@@ -1,0 +1,77 @@
+# otel-collector-config.yaml — gpumachine 执行面边缘采集（WO-0009 资产，05 脚本配套）
+#
+# 链路（方案 §4.9 #6 / §4.5 观测行）:
+#   openJiuwen tracer_otel（内置 redaction 脱敏，OTLP grpc/http）
+#     → 本机边缘 Collector（本文件；执行面边缘缓冲 = jiuwenswarm observability store 职责的落点）
+#     → srv-1 Collector（OTEL_EXPORT_TARGET，部署随 WO-0006 观测管道）
+#     → Langfuse（只做查询展示，不当中间层）+ MinIO ATIF（评测资产）
+# 脱敏责任在 tracer_otel 端（方案 v1.6 修正：redaction 是采集端内置）；
+# 本 Collector 只做传输与防爆（16KiB 截断沿用 jiuwenswarm 官方 deploy/observability 配置）。
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+  transform/limit_strings:
+    trace_statements:
+      - context: span
+        statements:
+          - truncate_all(attributes, 16384)
+
+exporters:
+  # 前送 srv-1（隧道）。srv-1 Collector 要求鉴权时，OTEL_EXPORT_HEADERS 注入 headers。
+  otlp/srv1:
+    endpoint: "${env:OTEL_EXPORT_TARGET}"
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      queue_size: 4096
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0s   # 永不放弃——隧道断时本地排队（边缘缓冲语义）
+  # 本地调试出口（排障用；生产 pipeline 不挂）
+  debug:
+
+extensions:
+  # 隧道中断时的本地持久化缓冲（执行面边缘缓冲）
+  # create_directory: 目录缺失时自建——otelcol validate/容器首跑不依赖 05 脚本先 mkdir
+  file_storage:
+    directory: /var/lib/otelcol/gpumachine
+    create_directory: true
+    timeout: 1s
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [file_storage, health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/limit_strings, batch]
+      exporters: [otlp/srv1]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/srv1]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/limit_strings, batch]
+      exporters: [otlp/srv1]

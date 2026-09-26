@@ -1,7 +1,7 @@
 # RUNBOOK（公开镜像）— gpumachine 开通后零到一上线清单（WO-0009）
 
-> **公开镜像说明**：本文为去私有化版本。完整可执行脚本、含占位地址的配置模板在
-> 公司私有仓（CNB `company-ops` → `deploy/gpumachine/`）；本文占位符以 `<...>` 表示。
+> **公开镜像说明**：本文为去私有化版本。可执行脚本与配置模板已占位符化镜像至本仓库
+> `deploy/gpumachine/`（2026-09-26 起，真相源在公司私有仓 CNB `company-ops`）；占位符以 `<...>` 表示。
 > 方案依据：PROP-0001 §1 / §2（OS 策略）/ §2.5 / §11（V100S sm_70 兼容性风险）/ §4.9。
 > 工单依据：WO-0009"gpumachine 执行面准备（不变 + OS 转换动作 7）"。
 >
@@ -20,7 +20,7 @@
 | P3 | 克隆私有仓部署资产到机器 `/opt/gpumachine/deploy/` | `deploy/gpumachine/` 是执行面配置真相源 |
 | P4 | srv-1 侧经隧道放行：Higress 8080 / Postgres 5432 / OpenBao 8200 | 三者当前只绑回环（WO-0001 `LISTEN_IP` 机制）；放行 + 团队库建库属 M1 WO-0003 联调 |
 | P5 | OpenBao：写入模型入口 key 与团队库 DSN（路径 `<vault-path>`）；给机器发短期 worker token（0600，ttl≤1h） | worker policy 已由 WO-0005 建好（只读模型凭据）；token 续期在 M1 落地 |
-| P6 | CNB 云构建绿色（已跑）：anolis-23 容器内 jiuwenswarm[distribute] 安装 + vLLM 依赖解析 | 结论见私有仓 `.cnb.yml` 头注释 |
+| P6 | CNB 云构建绿色（五环节闭环，2026-09-26）：jiuwenswarm[distribute] 真安装+配置渲染+CLI、vLLM 依赖解析、otelcol validate、01/02 dry-run、jiuwen-glue pytest 26/26 全过 | 结论见私有仓 `.cnb.yml` 头注释与下文「Anolis 云构建闭环验证状态」节 |
 
 ## 执行序列（开通当日，按序）
 
@@ -55,12 +55,26 @@ P1 重装完成 → P2 隧道 → P3 克隆资产 → cp config.example.env conf
 | 执行面转 Anolis+Agentic OS（动作 7，方案 §2） | P1 重装 | `cat /etc/anolis-release` 为 Anolis 23 | 开通后执行 |
 | 磁盘清到 <70%（工单动作 1） | 01 脚本 | S2 退出码 0 | 开通后执行 |
 | docker + NVIDIA 容器运行时（工单动作 1） | 02 脚本 | S3 GPU 冒烟见 `Tesla V100` | 开通后执行 |
-| jiuwenswarm distribute、Postgres 指 srv-1 隧道占位、CONFIG_URL=off、端点指 Higress（工单动作 1） | 03 脚本 | S4 + 配置断言 | 安装层经 CNB anolis-23 验证；起服依赖 P4 |
-| vLLM/agent-infer + sm_70 降级路径（工单动作 1） | 04 脚本 + ADR-0001 | S5 冒烟通过；ADR §6 回填 | ADR 决策留空（待真机实测） |
-| 观测：OTel 边缘缓冲 + AgentSight（工单动作 1；§4.9 #6） | 05 脚本 | S6 health_check；端到端可见属 WO-0006 | 采集端代码就绪 |
+| jiuwenswarm distribute、Postgres 指 srv-1 隧道占位、CONFIG_URL=off、端点指 Higress（工单动作 1） | 03 脚本 | S4 + 配置断言 | 安装/配置渲染/CLI 层经 CNB anolis-23 闭环验证；起服依赖 P4 |
+| vLLM/agent-infer + sm_70 降级路径（工单动作 1） | 04 脚本 + ADR-0001 | S5 冒烟通过；ADR §6 回填 | 依赖解析层经 CNB 闭环验证（vllm==0.9.2→torch==2.7.0+xformers==0.0.30）；sm_70 实装待真机（ADR 决策留空） |
+| 观测：OTel 边缘缓冲 + AgentSight（工单动作 1；§4.9 #6） | 05 脚本 | S6 health_check；端到端可见属 WO-0006 | 配置层经 CNB otelcol validate 验证；采集链路待真机 |
 | 资产入 CNB + GitHub 去私有化镜像（工单动作 4） | 本次提交 | 私有仓全量 + 本镜像 | 已完成 |
 | 三条铁律失败用例（工单动作 5） | — | 不在本工单：留待胶水层工单（WO-0003） | N/A |
-| Anolis 环境验证经 CNB 云构建 | `.cnb.yml` | 构建记录绿色 | 已通过（2026-09-26，详细结论在私有仓 `.cnb.yml` 头注释） |
+| Anolis 环境验证经 CNB 云构建 | `.cnb.yml` 五环节闭环流水线 | 构建记录绿色：六 stage 全 success（cnb-lcn-1k3dih9hv，commit a127c13，900s） | 已通过（2026-09-26，详见下节） |
+
+## Anolis 云构建闭环验证状态（2026-09-26，构建 cnb-lcn-1k3dih9hv）
+
+流水线 `.cnb.yml` → `anolis-23-devloop`（openanolis/anolisos:23 容器，六 stage 全 success，
+commit a127c13，总时长 900s）。构建记录（私有仓）：<https://cnb.cool/Cloudbird-Software/company-ops/-/build/logs/cnb-lcn-1k3dih9hv>
+
+| 环节 | 验证内容 | 状态 |
+| --- | --- | --- |
+| 环节1 | jiuwenswarm[distribute] 真安装（PyPI 包名 jiuwenswarm）+ `config.example.env` 渲染 + `JIUWENSWARM_CONFIG_URL=off`/端点唯一断言 + 配置双路解析 + 12 个 CLI 入口点可运行（11/12 --help 通过） | **[已验证-Anolis云构建]**（stage-1，227s） |
+| 环节2 | vLLM==0.9.2 依赖解析（不下大包）：pip --dry-run 600s 超时 → uv pip compile 元数据级兜底；`artifacts/vllm-versions.txt` 141 个锁定包：vllm==0.9.2 → torch==2.7.0 + xformers==0.0.30 | **[已验证-Anolis云构建]**（解析层，stage-2，616s）；sm_70 实装 **[待GPU实测]** |
+| 环节3 | `otel/otel-collector-config.yaml` 经 otelcol-contrib 0.154.0 官方 validate | **[已验证-Anolis云构建]**（stage-3，24s） |
+| 环节4 | 01/02 脚本 bash -n + dry-run（01 两轮含强制扫描；02 全干跑 + daemon.json 预览校验） | **[已验证-Anolis云构建]**（stage-4） |
+| 环节5 | jiuwen-glue 全量 pytest（本仓） | 26 passed / 0 failed，**[已验证-Anolis云构建]**（stage-5，9s） |
+| S1~S7 真机执行 | 01~05 实机运行、GPU 容器冒烟、agentsight eBPF、Higress 端到端 | **[待GPU实测]**（机器未开通，开通当日按执行序列执行） |
 
 ## 红线
 
