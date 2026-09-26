@@ -44,7 +44,7 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 ```bash
 pip install -e .          # 或 uv pip install -e .
-python -m pytest          # 91 项测试，全离线（无需数据库/网络）
+python -m pytest          # 主包 196 项测试，全离线（无需数据库/网络）；providers/e2b_compat 与 tools/console-tui 子包另各 41 / 56 项
 ```
 
 ```python
