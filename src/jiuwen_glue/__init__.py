@@ -12,11 +12,38 @@
 - 记忆晋升管线（个人→组织资产晋升：质量门+脱敏门+版本化，不回写执行面）  → :mod:`jiuwen_glue.promotion`
 - 决策记录（append-only）                                                → :mod:`jiuwen_glue.decisions`
 - 产物路由表 + 节点容量模型（便宜三件 Python 侧）                        → :mod:`jiuwen_glue.routes`
+- 决策层 MVP（JevProvider 三原语：classify/score/judge + 决策留痕）      → :mod:`jiuwen_glue.decision`
+- 消融验证（WO-0007 件 1：准入前 A/B 对照，原生没有对照实验）            → :mod:`jiuwen_glue.ablation`
+- 准入记录（WO-0007 件 2：消融+GuardrailRun 硬规则，绑定 Spec 版本）     → :mod:`jiuwen_glue.admission`
 
 边界（写死）: 原生层管"怎么做"，glue 管"准不准进"，控制台管"看得见"；
 发现与编排一律用原生 Symphony，本包不自建发现机制；
 **glue 不新增第二个决策点**（GuardrailRun 聚合 verdict 是唯一门控输出）。
 """
+from .ablation import (
+    ABLATION_VERDICTS,
+    VERDICT_IMPROVED,
+    VERDICT_INCONCLUSIVE,
+    VERDICT_NEUTRAL,
+    VERDICT_REGRESSED,
+    AblationArm,
+    AblationError,
+    AblationExperiment,
+    AblationResult,
+    PairScore,
+    sign_test_p,
+)
+from .admission import (
+    ADMISSION_DECISIONS,
+    DECISION_ALLOWED,
+    DECISION_HELD,
+    DECISION_REJECTED,
+    AdmissionError,
+    AdmissionLedger,
+    AdmissionRecord,
+    export_to_skillpack,
+    guardrail_verdict_of,
+)
 from .capabilities import (
     ADMITTED,
     CANDIDATE,
@@ -35,6 +62,23 @@ from .challenge import (
     PENDING as CHALLENGE_PENDING,
     Challenge,
     ChallengeBoard,
+)
+from .decision import (
+    PRIMITIVES,
+    PRIMITIVE_CLASSIFY,
+    PRIMITIVE_JUDGE,
+    PRIMITIVE_SCORE,
+    SCORE_RUBRIC_PROMOTION,
+    DecisionLayer,
+    DecisionLayerError,
+    JevBackend,
+    JevBackendError,
+    JevProvider,
+    ModelBackend,
+    PrimitiveOutcome,
+    RefusalRecord,
+    RuleBasedBackend,
+    make_score_hook,
 )
 from .decisions import DecisionLog, DecisionRecord, context_hash
 from .errors import (
@@ -164,6 +208,7 @@ __all__ = [
     "PromotionTransitionError", "UnknownPromotionAssetError",
     "DecisionSchemaError", "UnknownDecisionError",
     "ArtifactRouteUndeclaredError", "RouteSchemaError", "CapacitySchemaError",
+    "DecisionLayerError", "JevBackendError", "AblationError", "AdmissionError",
     # leases
     "BudgetLedger", "BudgetLease",
     "ACTIVE", "EXHAUSTED", "EXPIRED", "REVOKED",
@@ -198,6 +243,18 @@ __all__ = [
     "GATE_PASS", "GATE_BLOCKED", "GATE_UNKNOWN",
     # decisions（决策记录，append-only）
     "DecisionLog", "DecisionRecord", "context_hash",
+    # decision（决策层 MVP：JevProvider 三原语，WO-0010）
+    "DecisionLayer", "JevProvider", "JevBackend", "RuleBasedBackend", "ModelBackend",
+    "PrimitiveOutcome", "RefusalRecord", "make_score_hook",
+    "PRIMITIVE_CLASSIFY", "PRIMITIVE_SCORE", "PRIMITIVE_JUDGE", "PRIMITIVES",
+    "SCORE_RUBRIC_PROMOTION",
+    # ablation（WO-0007 件 1：消融验证）
+    "AblationArm", "AblationExperiment", "AblationResult", "PairScore", "sign_test_p",
+    "VERDICT_IMPROVED", "VERDICT_NEUTRAL", "VERDICT_REGRESSED", "VERDICT_INCONCLUSIVE",
+    "ABLATION_VERDICTS",
+    # admission（WO-0007 件 2：准入记录 + skill-pack 外发）
+    "AdmissionLedger", "AdmissionRecord", "export_to_skillpack", "guardrail_verdict_of",
+    "DECISION_ALLOWED", "DECISION_REJECTED", "DECISION_HELD", "ADMISSION_DECISIONS",
     # routes（便宜三件 Python 侧）
     "ArtifactRoute", "ArtifactRouteTable", "NodeCapacity",
     "SINK_GIT", "SINK_MINIO", "SINK_EVAL_ASSETS",
