@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwen-e2b-compat"
+version = "0.1.0"
+description = "E2B-compatible sandbox provider for the openJiuwen SandboxRegistry (PROP-0008; PROP-0001 v1.7 section 12.8). Core package is dependency-free; the e2b SDK is an optional extra."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "CloudCrane-Software" }]
+keywords = ["openjiuwen", "e2b", "sandbox", "provider", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# 真连 E2B 云时才需要；核心代码零强制第三方依赖（EXECUTION-PROTOCOL.md 工程纪律）。
+e2b = ["e2b>=1.0"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# 子包独立跑：pytest 从 providers/e2b_compat 目录执行，不经 glue 主包 testpaths。
+testpaths = ["tests"]
+pythonpath = ["src"]
