@@ -82,6 +82,19 @@ assert result.executable          # fail-closed：只有 PASS 为 True
 # Evidence 三态 / 能力元数据 / 晋升 / 决策记录 / 路由表——详见各模块 docstring
 ```
 
+## Wave2 能力（fleet / 决策层 / e2b_compat / console-tui）
+
+四个 Wave2 分支已按 fleet → decision → e2b → tui 顺序合并进 main（各为独立 merge commit，零冲突）：
+
+| 子项 | 能力 | 路径 | 测试 | 依据 |
+| --- | --- | --- | --- | --- |
+| **fleet 调度器**（WO-0011） | 节点池注册协议（OpenBao JWT 声明式注册/心跳/STALE 兜底，不验签）+ P1 贪心调度器（派工制/自取制两模式、份额记账、Budget Lease 派生）+ 自取制 worker 客户端协议（模拟侧）；复用 routes/leases/identity/guardrail，不重造 | `src/jiuwen_glue/fleet/`（registration / scheduler / worker） | 56 项（全离线） | PROP-0003 / PROP-0004 P1；v1.7 §12.6/§13 |
+| **决策层 MVP**（WO-0010 + WO-0007 件 1/2） | JevProvider 三原语 classify/score/judge（返回值携带 decision_ref，每次高频决策落账）+ RuleBasedBackend 确定性后端 + `make_score_hook`（晋升打分唯一交叉点）；准入前 A/B 消融对照（sign-test 判定）；准入台账（消融+GuardrailRun 硬规则）+ skill-pack 外发 | `src/jiuwen_glue/` 下 `decision.py` / `ablation.py` / `admission.py` | 49 项 | v1.7 §0 总则 6/§12.7；v1.6 §4.7；手册 §3.3.1 原则三 |
+| **e2b_compat Provider**（PROP-0008） | openJiuwen SandboxRegistry 的 E2B 兼容三件套——云突发沙箱接成沙箱新 backend，不改 openjiwen 代码，glue 不新增沙箱决策点；核心零依赖，缺 e2b SDK 时优雅降级报错。**当前为 mock 级交付**（测试全用假客户端，未连真实 E2B 云） | `providers/e2b_compat/`（独立子包） | 41 项 | PROP-0008；v1.7 §12.8；`docs/e2b-compat-provider.md` |
+| **console-tui 治理驾驶舱**（WO-0012） | 治理面作战室 TUI（Textual）：读 glue 库五面板 + 三级受控干预 s/a/p，全部干预经控制台留痕（GuardrailRun Challenge 语义）；无 DSN 时 mock 演示模式；含第三方 TUI 开源项目评估报告（先评估后引进） | `tools/console-tui/`（独立工具包）；`tools/console-tui/docs/{console-tui,tui-research}.md` | 56 项 | v1.7 §12.3；TUI 调研 PROP-0007 |
+
+合并后主包 `python -m pytest` 196 项全绿（91 既有 + 56 fleet + 49 决策层）；`providers/e2b_compat` 与 `tools/console-tui` 各自独立 pytest 全绿（41 / 56）。
+
 ## Postgres DDL
 
 `sql/001_glue_objects.sql` + `sql/002_glue_v2.sql`（可重复执行，Python 层为第一道闸、DDL 约束/触发器为第二道闸）：
@@ -99,7 +112,8 @@ assert result.executable          # fail-closed：只有 PASS 为 True
 - WO-0002：M0 骨架（README / LICENSE / .gitignore）。
 - WO-0003 第 3-5 步：leases / evidence / capabilities / rules 四模块 + 三铁律失败用例 + 001 DDL + E2B 兼容差距报告（M0 已交付，独立审计复跑 26 测试通过）。
 - **WO-0003 返工（M0.5 前置，本次交付）**：按 M0 独立审计发现 1 补齐 GuardrailRun 协议聚合、记忆晋升管线、决策记录三模块；落地 v1.7 §12.5 JIT 身份三件（三层复合身份 / 权限交集公式进租约签发路径 / Challenge 结构化对象）；tenant_id 全对象覆盖；便宜三件 Python 侧（artifact_routes + nodes 容量模型，environments/ YAML 侧在 CNB company-ops 后续工单）；研发手册四边界核对文档。91 项测试全绿（26 项既有不破坏 + 65 项新增）。
-- 未做 / 不在本包：DDL 落生产库（srv-1 工单）、environments/ 与 pipelines/ YAML（company-ops 流水线工单）、决策层 Provider 本体（WO-0010 只留 `score_hook` 接口）、沙箱/网关/编排等一律用 openJiuwen 原生。
+- **Wave2 合并（本次交付）**：四开发分支按 fleet → decision → e2b → tui 顺序 `--no-ff` 合并进 main（远端分支保留评审留档）；主包 196 项测试全绿，e2b_compat 41 项、console-tui 56 项子包测试各自全绿。能力明细见上文「Wave2 能力」节。如实边界：决策层 ModelBackend 只留形状未发真实模型调用；e2b_compat 为 mock 级交付（[待云沙箱实测]）；fleet P2/P3 只做设计（docs/fleet-design.md）。
+- 未做 / 不在本包：DDL 落生产库（srv-1 工单）、environments/ 与 pipelines/ YAML（company-ops 流水线工单）、沙箱/网关/编排等一律用 openJiuwen 原生。
 
 ## License
 
