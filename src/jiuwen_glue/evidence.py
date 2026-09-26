@@ -47,6 +47,7 @@ class EvidenceTransition:
     checker: Optional[str] = None  # 验证人/器（verify 时必填）
     refs: Dict[str, Any] = field(default_factory=dict)
     note: Optional[str] = None
+    tenant_id: str = "t0"
 
 
 @dataclass
@@ -61,6 +62,7 @@ class Evidence:
     verified_method: Optional[str] = None
     finalized_at: Optional[float] = None
     seal_ref: Optional[str] = None
+    tenant_id: str = "t0"              # 租户（v1.7 §4.1 全对象字段；单租户起步）
 
 
 class EvidenceStore:
@@ -99,13 +101,15 @@ class EvidenceStore:
         self.transitions.append(EvidenceTransition(
             evidence_id=ev.evidence_id, from_state=from_state, to_state=to_state,
             kind=kind, occurred_at=self._now(), method=method, checker=checker,
-            refs=dict(refs or {}), note=note))
+            refs=dict(refs or {}), note=note, tenant_id=ev.tenant_id))
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
-    def create(self, subject: str, content: Dict[str, Any]) -> Evidence:
+    def create(self, subject: str, content: Dict[str, Any],
+               tenant_id: str = "t0") -> Evidence:
         ev = Evidence(evidence_id=uuid.uuid4().hex, subject=subject,
-                      content=copy.deepcopy(content), created_at=self._now())
+                      content=copy.deepcopy(content), created_at=self._now(),
+                      tenant_id=tenant_id or "t0")
         self._items[ev.evidence_id] = ev
         self._record(ev, "CREATE", to_state=DRAFT)
         return ev

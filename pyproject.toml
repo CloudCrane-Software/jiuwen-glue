@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwen-glue"
-version = "0.1.0"
-description = "openJiuwen glue layer: Budget Lease, Evidence (3 states), capability metadata registry, and the three coordination iron rules. Native openJiuwen capabilities are used as-is; this package only implements what openJiuwen does not have."
+version = "0.2.0"
+description = "openJiuwen glue layer: Budget Lease (with frozen effective-permission intersection at grant time), Evidence (3 states), capability metadata registry, the three coordination iron rules, GuardrailRun protocol aggregation (fail-closed), three-layer composite identity, structured Challenge, memory promotion pipeline, append-only decision records, artifact routes and node capacity. Native openJiuwen capabilities are used as-is; this package only implements what openJiuwen does not have and adds no second decision point."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

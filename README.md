@@ -4,16 +4,22 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 ## 定位
 
-依据《建设方案-多Agent系统与GitOps》（PROP-0001，存 CNB `company-ops`）第 0 节第 4 条、第 4.1 节与第 4.9 节边界总表，glue 只承载原生没有的能力。本包（WO-0003 第 3-5 步）实现其中三个对象与三铁律：
+依据《一人公司多 Agent 系统建设方案》（PROP-0001 v1.6/v1.7，存 CNB `proposals` 仓）§0 总则 4、§4.1 与 §4.9 边界总表，glue 只承载原生没有的能力。本包（WO-0003 + M0.5 返工补齐）实现九个模块：
 
-| 对象 | 模块 | 最小说明 |
+| 模块 | 说明 | 依据 |
 | --- | --- | --- |
-| **Budget Lease**（预算租约） | `jiuwen_glue.leases` | 发放 / 占用 / 过期；子任务派生即从父租约划出额度；撤销**级联**到全部后代；超额占用被拒并留痕 |
-| **Evidence 三态** | `jiuwen_glue.evidence` | `draft → verified → finalized` 只进不退；内容仅 draft 可编辑；finalized 封存；能力准入只认 verified/finalized 证据 |
-| **能力元数据注册** | `jiuwen_glue.capabilities` | 五类机读声明（副作用/幂等/可安全重试/风险等级/前置条件）+ 版本准入（必须挂已验证证据）+ 指标**单向回流**（只增不改，无手改接口） |
-| **协同三铁律** | `jiuwen_glue.rules` | Task 台账 = Team State 唯一承载；消息回执不承载状态语义；拆分任务校验 |
+| `leases` **Budget Lease**（预算租约） | 发放 / 占用 / 过期；子任务派生即从父租约划出额度；撤销**级联**到全部后代；超额占用被拒并留痕；**签发时求值并固化权限交集快照**（v1.7 §12.5），派生强制"子快照 ⊆ 父快照" | v1.6 §4.1 |
+| `evidence` **Evidence 三态** | `draft → verified → finalized` 只进不退；内容仅 draft 可编辑；finalized 封存；能力准入只认 verified/finalized 证据 | v1.6 §4.1 |
+| `capabilities` **能力元数据注册** | 五类机读声明（副作用/幂等/可安全重试/风险等级/前置条件）+ 版本准入（必须挂已验证证据）+ 指标**单向回流**（只增不改，无手改接口）；台账按租户键控 | v1.6 §4.1/4.9#1 |
+| `rules` **协同三铁律** | Task 台账 = Team State 唯一承载；消息回执不承载状态语义；拆分任务校验 | v1.6 §4.3 |
+| `guardrail` **GuardrailRun 协议聚合薄层** | 手册 §3.3.2 五步链路（提交上下文→固化→提交判断与 Evidence→验收固化→执行前门控查询）；聚合三态 PASS/BLOCKED/UNKNOWN，**fail-closed：UNKNOWN 必须拒绝**；可 emit Challenge（ask 语义） | 手册 §3.3.2；M0 审计发现 1 |
+| `identity` **三层复合身份 + 权限交集公式** | 稳定 Agent / 运行实例 / 任务上下文；有效权限 = 用户 ∩ Agent 能力 ∩ 平台策略 ∩ 委托范围 ∩ 运行时约束（含每分量出处）；子委托 ⊆ 上游不变式 | 手册 §3.3.1 原则一/二；v1.7 §12.5 |
+| `challenge` **Challenge 结构化对象** | 授权三态第三态：谁确认/什么资源/什么动作/什么方式/有效期；过期即 expired（fail-closed）；模型只见高层状态，拿不到授权码 | 手册 §3.3.1；v1.7 §12.5 |
+| `promotion` **记忆晋升管线** | 只做"个人→组织"资产晋升（working→shortlist→promoted + rejected/withdrawn）：质量门（eval 指标 append-only）+ 脱敏门（未注入 checker 即 UNKNOWN 拒绝）+ 可选 `score_hook`（决策层 §4.7 第六植入点，唯一交叉点）+ 单调版本化 + tombstone 撤回；**不回写执行面记忆** | v1.6 §4.9#4；M0 审计发现 1 |
+| `decisions` **决策记录（append-only）** | agent_ref（三层身份）/context_hash/options/chosen/rationale_ref/guardrail_run_ref/tenant_id；只增不改——无任何 update/delete 接口（DDL 层另有拒绝触发器兜底） | M0 审计发现 1 |
+| `routes` **产物路由表 + 节点容量**（便宜三件 Python 侧） | `ArtifactRouteTable`：pipeline→sink 声明（基线 code→git / video→minio / eval→eval-assets），**未声明路由 = 显式错误（防产物误入 git）**；`NodeCapacity`：cpu/gpu_frac（0.0–1.0 份额）/tools/trust_level/max_parallel/online_window，不可信节点只派沙箱任务类 | v1.7 §13/§12.6 |
 
-三条铁律（PROP-0001 第 4.3 节；母本为 Handbook 第 11 章 + openJiuwen agent_teams specs）：
+三条铁律（PROP-0001 §4.3；母本为 Handbook 第 11 章 + openJiuwen agent_teams specs）：
 
 1. 消息可以触发任务或补充信息，但**发送成功不代表任务已被承接**；
 2. **不能把对话历史当作 Team State**，协作事实由 Task State 与 Artifact 维护（完成任务必须带 TaskRun 与 Artifact 引用）；
@@ -21,58 +27,79 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 每条铁律各有一条失败用例（`tests/test_iron_rules.py`）：喂入违规输入，断言抛出对应 `IronRuleViolation` 子类 + `violation_log` 留痕 + 任务事实未被篡改——**违规必被检测**。
 
+`tenant_id`（v1.7 §4.1）：全部数据类统一携带，默认 `"t0"`（单租户起步，字段全对象覆盖）。
+
 ## 边界（写死）
 
 - 原生层管"怎么做"，glue 管"准不准进"，控制台管"看得见"。
 - 凡可能有两个决策点的，必须收敛为一个；冲突记 ADR。
-- 第 4.9 节 14 项边界表之外，glue 不新增决策点；**发现与编排一律用原生 Symphony，本包不自建发现机制**（4.9 #1）。
+- §4.9 边界总表之外，glue 不新增决策点；**发现与编排一律用原生 Symphony，本包不自建发现机制**（4.9 #1）。
+- **glue 不新增第二个决策点**：GuardrailRun 聚合 verdict（PASS/BLOCKED/UNKNOWN）是唯一门控输出；检查执行属原生 `core.security.guardrail` 与各执行点（TeamPermissionRail / OPA / eval-gate / 扫描器）——`guardrail.py` 模块 docstring 写死并有测试断言公开方法集。
+- 晋升管线**不回写执行面记忆**；决策记录**不参与决策**；路由表**不做调度**（Wave2 WO-0011）。
+- 凭证不在 glue：Credential Broker = OpenBao（执行面零长期密钥）。
+- 四对象/五原则/五步链路的逐条核对见 **`docs/native-handbook-boundary-check.md`**（含如实偏差与待办）。
 - 协议兼容 ≠ 能力等价（见 `docs/e2b-compat-gap-report.md`）。
 
 ## 快速上手
 
 ```bash
 pip install -e .          # 或 uv pip install -e .
-python -m pytest          # 26 项测试，全离线（无需数据库/网络）
+python -m pytest          # 91 项测试，全离线（无需数据库/网络）
 ```
 
 ```python
-from jiuwen_glue import BudgetLedger, EvidenceStore, CapabilityRegistry, TaskLedger
+from jiuwen_glue import (
+    BudgetLedger, EvidenceStore, CapabilityRegistry, TaskLedger,
+    GuardrailRunStore, GuardrailSpec, CheckSpec, BACKEND_SCAN,
+    AgentIdentity, RunInstance, TaskContext, composite_ref,
+    effective_permissions, ChallengeBoard, PromotionLedger,
+    DecisionLog, ArtifactRouteTable, NodeCapacity,
+)
 
-# Budget Lease：随子任务派生 + 级联撤销
+# Budget Lease：随子任务派生 + 级联撤销 + 签发时固化权限交集
+agent = composite_ref(AgentIdentity("dev-core"), RunInstance("i-1", "node-0"),
+                      TaskContext("wo-0003"))
+eps = effective_permissions(user={"svc-a:logs:read"}, agent_caps={"svc-a:logs:read"},
+                            platform_policy={"svc-a:logs:read"},
+                            delegation={"svc-a:logs:read"},
+                            runtime={"svc-a:logs:read"})
 led = BudgetLedger()
-root = led.grant("task-root", 1000)
-child = led.grant("task-child", 300, parent_lease_id=root.lease_id)  # 派生即划出
-led.acquire(child.lease_id, 120, purpose="run-1")                    # 占用
+root = led.grant("task-root", 1000, agent_ref=agent, effective_perms=eps)
+child = led.grant("task-child", 300, parent_lease_id=root.lease_id)  # 派生即划出；perms ⊆ 父
+led.acquire(child.lease_id, 120, purpose="run-1")
 led.revoke(root.lease_id, reason="owner cancelled")                  # 级联撤销
 
-# Evidence 三态
-ev = EvidenceStore().create("task_run:42", {"summary": "..."})
-# ev.verify(...); ev.finalize(...)  → 只进不退
+# GuardrailRun：五步链路，聚合 verdict 是唯一门控输出（UNKNOWN 必须拒绝）
+store = GuardrailRunStore(challenge_board=ChallengeBoard())
+run = store.create_run(GuardrailSpec(
+    action="release.resume", resource="batch:cfg-01", agent_identity_ref=agent,
+    checks=(CheckSpec(check_id="static-scan", backend=BACKEND_SCAN),)))
+store.submit_check(run.run_id, "static-scan", "PASS", evidence_ref="ev-1")
+store.finalize(run.run_id, seal_ref="seal-1")
+result = store.gate(run.run_id)
+assert result.executable          # fail-closed：只有 PASS 为 True
 
-# 能力元数据：五类机读声明 + 版本准入
-reg = CapabilityRegistry()
-reg.register(CapabilityDeclaration(
-    capability_id="skill.web", version="1.0.0", name="web skill",
-    side_effect="read", idempotent=True, retry_safe=True, risk_level=1,
-    preconditions=("network.allow(egress:higress)",)))
+# Evidence 三态 / 能力元数据 / 晋升 / 决策记录 / 路由表——详见各模块 docstring
 ```
 
 ## Postgres DDL
 
-`sql/001_glue_objects.sql`（可重复执行，Python 层为第一道闸、DDL 约束/触发器为第二道闸）：
+`sql/001_glue_objects.sql` + `sql/002_glue_v2.sql`（可重复执行，Python 层为第一道闸、DDL 约束/触发器为第二道闸）：
 
 - `glue.budget_lease` / `glue.lease_event`（占用留痕 + 超额触发器）
 - `glue.evidence` / `glue.evidence_transition`（前向迁移 + 内容冻结触发器）
 - `glue.capability_version` / `glue.capability_metric_event` / `glue.capability_metrics` 视图（准入证据触发器 + 只追加指标）
 - `glue.team_task` / `glue.task_transition` / `glue.message_receipt` / `glue.rule_violation`（source 白名单把消息/对话历史挡在任务事实之外）
+- `002_glue_v2.sql`：`glue.guardrail_run` / `glue.guardrail_check_result` / `glue.challenge` / `glue.decision_record`（append-only 触发器）/ `glue.promotion_record` / `glue.artifact_route` / `glue.node`；并对 001 既有表幂等 `ALTER ... ADD COLUMN IF NOT EXISTS tenant_id`。消费方：jiuwen-glue 各模块 + Wave2 fleet 调度器 / 控制台 TUI。
 
-运维权威副本在 CNB `company-ops` 仓库 `ops/sql/001_glue_objects.sql`（私有）；两处内容一致。
+运维权威副本在 CNB `company-ops` 仓库 `ops/sql/`（私有）；两处内容一致。DDL 落生产库由 srv-1 工单执行。
 
-## 状态
+## 状态（如实）
 
 - WO-0002：M0 骨架（README / LICENSE / .gitignore）。
-- WO-0003 第 3-5 步（本包）：三对象最小实现 + Postgres DDL + 三铁律失败用例 + E2B 兼容差距报告（`docs/e2b-compat-gap-report.md`）。纯 Python、零运行时依赖、测试离线可跑。
-- 不在本包：GuardrailRun 协议聚合、记忆晋升管线（后续工单）；沙箱/网关/编排等一律用 openJiuwen 原生。
+- WO-0003 第 3-5 步：leases / evidence / capabilities / rules 四模块 + 三铁律失败用例 + 001 DDL + E2B 兼容差距报告（M0 已交付，独立审计复跑 26 测试通过）。
+- **WO-0003 返工（M0.5 前置，本次交付）**：按 M0 独立审计发现 1 补齐 GuardrailRun 协议聚合、记忆晋升管线、决策记录三模块；落地 v1.7 §12.5 JIT 身份三件（三层复合身份 / 权限交集公式进租约签发路径 / Challenge 结构化对象）；tenant_id 全对象覆盖；便宜三件 Python 侧（artifact_routes + nodes 容量模型，environments/ YAML 侧在 CNB company-ops 后续工单）；研发手册四边界核对文档。91 项测试全绿（26 项既有不破坏 + 65 项新增）。
+- 未做 / 不在本包：DDL 落生产库（srv-1 工单）、environments/ 与 pipelines/ YAML（company-ops 流水线工单）、决策层 Provider 本体（WO-0010 只留 `score_hook` 接口）、沙箱/网关/编排等一律用 openJiuwen 原生。
 
 ## License
 

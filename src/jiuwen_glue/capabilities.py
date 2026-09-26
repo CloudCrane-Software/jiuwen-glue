@@ -53,6 +53,7 @@ class CapabilityDeclaration:
     retry_safe: bool
     risk_level: int                  # 0..4
     preconditions: tuple = ()        # 前置条件（机读字符串/表达式引用）
+    tenant_id: str = "t0"            # 租户（v1.7 §4.1 全对象字段；单租户起步）
 
     def validate(self) -> None:
         problems: List[str] = []
@@ -60,6 +61,8 @@ class CapabilityDeclaration:
             problems.append("capability_id must be a non-empty string")
         if not self.version or not isinstance(self.version, str):
             problems.append("version must be a non-empty string")
+        if not self.tenant_id or not isinstance(self.tenant_id, str):
+            problems.append("tenant_id must be a non-empty string")
         if self.side_effect not in SIDE_EFFECTS:
             problems.append(f"side_effect must be one of {SIDE_EFFECTS}, got {self.side_effect!r}")
         if not isinstance(self.idempotent, bool):
@@ -80,10 +83,16 @@ class CapabilityVersion:
     declaration: CapabilityDeclaration
     status: str = CANDIDATE
     admitted_evidence_id: Optional[str] = None
+    tenant_id: str = "t0"
 
 
 class CapabilityRegistry:
-    """进程内能力治理台账（Postgres DDL 见 sql/001_glue_objects.sql 的 glue.capability_version）。"""
+    """进程内能力治理台账（Postgres DDL 见 ops/sql/001_glue_objects.sql 的 glue.capability_version）。
+
+    台账按 (tenant_id, capability_id, version) 键控；既有调用签名
+    ``get(capability_id, version)`` 等默认 tenant_id="t0" 保持兼容（v1.7 §4.1
+    tenant_id 全对象字段，单租户起步）。
+    """
 
     def __init__(self, evidence: Optional[EvidenceStore] = None) -> None:
         self._versions: Dict[tuple, CapabilityVersion] = {}
@@ -93,26 +102,29 @@ class CapabilityRegistry:
 
     def register(self, declaration: CapabilityDeclaration) -> CapabilityVersion:
         declaration.validate()
-        key = (declaration.capability_id, declaration.version)
+        key = (declaration.tenant_id, declaration.capability_id, declaration.version)
         if key in self._versions:
             raise DeclarationSchemaError(
-                f"capability {declaration.capability_id}@{declaration.version} already registered")
-        cap = CapabilityVersion(declaration=declaration)
+                f"capability {declaration.capability_id}@{declaration.version} "
+                f"(tenant {declaration.tenant_id}) already registered")
+        cap = CapabilityVersion(declaration=declaration, tenant_id=declaration.tenant_id)
         self._versions[key] = cap
         return cap
 
-    def get(self, capability_id: str, version: str) -> CapabilityVersion:
+    def get(self, capability_id: str, version: str,
+            tenant_id: str = "t0") -> CapabilityVersion:
         try:
-            return self._versions[(capability_id, version)]
+            return self._versions[(tenant_id, capability_id, version)]
         except KeyError:
             raise UnknownCapabilityError(
-                f"unknown capability {capability_id}@{version}") from None
+                f"unknown capability {capability_id}@{version} (tenant {tenant_id})") from None
 
     # ── 版本准入 ──────────────────────────────────────────────────────────
 
-    def admit(self, capability_id: str, version: str, evidence_id: str) -> CapabilityVersion:
+    def admit(self, capability_id: str, version: str, evidence_id: str,
+              tenant_id: str = "t0") -> CapabilityVersion:
         """准入必须挂一条 VERIFIED/FINALIZED 证据；否则拒绝并留痕（status=REJECTED）。"""
-        cap = self.get(capability_id, version)
+        cap = self.get(capability_id, version, tenant_id)
         if cap.status == ADMITTED:
             return cap
         if not self.evidence.admit_ready(evidence_id):
@@ -124,24 +136,27 @@ class CapabilityRegistry:
         cap.admitted_evidence_id = evidence_id
         return cap
 
-    def reject(self, capability_id: str, version: str) -> CapabilityVersion:
-        cap = self.get(capability_id, version)
+    def reject(self, capability_id: str, version: str,
+               tenant_id: str = "t0") -> CapabilityVersion:
+        cap = self.get(capability_id, version, tenant_id)
         cap.status = REJECTED
         return cap
 
-    def is_admitted(self, capability_id: str, version: str) -> bool:
-        return self.get(capability_id, version).status == ADMITTED
+    def is_admitted(self, capability_id: str, version: str,
+                    tenant_id: str = "t0") -> bool:
+        return self.get(capability_id, version, tenant_id).status == ADMITTED
 
     # ── 指标：单向回流，只增不改 ──────────────────────────────────────────
 
-    def record_execution(self, capability_id: str, version: str, outcome: str) -> int:
+    def record_execution(self, capability_id: str, version: str, outcome: str,
+                         tenant_id: str = "t0") -> int:
         """记录一次执行结果（success/failure/hit/miss）。返回该 (capability, outcome) 计数。
 
         这是指标唯一入口——没有设置/覆盖指标的 API（单向回流）。"""
         if outcome not in ("success", "failure", "hit", "miss"):
             raise ValueError("outcome must be success|failure|hit|miss")
-        self.get(capability_id, version)  # UnknownCapabilityError if absent
-        key = (capability_id, version, outcome)
+        self.get(capability_id, version, tenant_id)  # UnknownCapabilityError if absent
+        key = (tenant_id, capability_id, version, outcome)
         self._metrics[key] = self._metrics.get(key, 0) + 1
         return self._metrics[key]
 
@@ -151,13 +166,16 @@ class CapabilityRegistry:
             self._metric_counts: Dict[tuple, int] = {}
         return self._metric_counts
 
-    def metrics_of(self, capability_id: str, version: str) -> Dict[str, float]:
+    def metrics_of(self, capability_id: str, version: str,
+                   tenant_id: str = "t0") -> Dict[str, float]:
         """命中率（hit/(hit+miss)）与成功率（success/(success+failure)），无数据返回空。"""
-        self.get(capability_id, version)
+        self.get(capability_id, version, tenant_id)
         m = self._metrics
         out: Dict[str, float] = {}
-        hit, miss = m.get((capability_id, version, "hit"), 0), m.get((capability_id, version, "miss"), 0)
-        ok, fail = m.get((capability_id, version, "success"), 0), m.get((capability_id, version, "failure"), 0)
+        hit, miss = m.get((tenant_id, capability_id, version, "hit"), 0), \
+            m.get((tenant_id, capability_id, version, "miss"), 0)
+        ok, fail = m.get((tenant_id, capability_id, version, "success"), 0), \
+            m.get((tenant_id, capability_id, version, "failure"), 0)
         if hit + miss:
             out["hit_rate"] = hit / (hit + miss)
         if ok + fail:

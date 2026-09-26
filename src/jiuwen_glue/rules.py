@@ -69,6 +69,7 @@ class ViolationRecord:
     code: str
     occurred_at: float
     detail: Dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "t0"
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class MessageReceipt:
     sender: str
     delivered_at: float
     text: str
+    tenant_id: str = "t0"
 
 
 @dataclass
@@ -92,6 +94,7 @@ class Task:
     parent_task_id: Optional[str] = None
     run_ref: Optional[str] = None        # 完成时的 TaskRun 引用（协作事实承载）
     artifact_ref: Optional[str] = None   # 完成时的 Artifact 引用
+    tenant_id: str = "t0"                # 租户（v1.7 §4.1 全对象字段；单租户起步）
 
 
 class TaskLedger:
@@ -128,20 +131,24 @@ class TaskLedger:
 
     def create(self, title: str, *, owner: Optional[str] = None,
                deliverable: Optional[str] = None,
-               parent_task_id: Optional[str] = None) -> Task:
+               parent_task_id: Optional[str] = None,
+               tenant_id: str = "t0") -> Task:
         task = Task(task_id=uuid.uuid4().hex, title=title, owner=owner,
-                    deliverable=deliverable, parent_task_id=parent_task_id)
+                    deliverable=deliverable, parent_task_id=parent_task_id,
+                    tenant_id=tenant_id or "t0")
         self._tasks[task.task_id] = task
         self.transitions.append({"task_id": task.task_id, "from": None, "to": PENDING,
                                  "source": "admin", "at": self._now(), "by": owner})
         return task
 
-    def post_message(self, task_ref: str, sender: str, text: str) -> MessageReceipt:
+    def post_message(self, task_ref: str, sender: str, text: str,
+                     tenant_id: str = "t0") -> MessageReceipt:
         """投递一条与任务相关的消息。返回回执——发送成功 ≠ 任务被承接（铁律 1）。
 
         本方法不触碰任务状态：没有任何从这里通往 claim/complete 的代码路径。"""
         return MessageReceipt(receipt_id=uuid.uuid4().hex, task_ref=task_ref,
-                              sender=sender, delivered_at=self._now(), text=text)
+                              sender=sender, delivered_at=self._now(), text=text,
+                              tenant_id=tenant_id or "t0")
 
     # ── 状态变更（唯一入口，来源受检） ────────────────────────────────────
 
@@ -249,3 +256,4 @@ class SubtaskSpec:
     deliverable: str
     owner: str
     depends_on: tuple = ()   # 兄弟子任务标题的显式依赖
+    tenant_id: str = "t0"

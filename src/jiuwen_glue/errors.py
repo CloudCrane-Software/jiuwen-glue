@@ -115,3 +115,95 @@ class UnknownTaskError(GlueError):
 
 class MissingTaskReferenceError(GlueError):
     """完成状态变更缺少 TaskRun / Artifact 引用（协作事实必须有台账承载）。"""
+
+
+# ── 三层复合身份与权限交集（WO-0003 返工：研发手册原则一/二）─────────────────
+
+class IdentityError(GlueError):
+    pass
+
+
+class IdentitySchemaError(IdentityError):
+    """三层身份对象字段不合法（缺稳定 Agent id / 实例 id / 任务 id 等）。"""
+
+
+class DelegationScopeError(IdentityError):
+    """子委托范围超出上游（原则二：权限只能逐级收敛，子委托 ⊆ 上游）。"""
+
+
+# ── GuardrailRun 协议聚合（WO-0003 返工：手册 §3.3.2）────────────────────────
+
+class GuardrailError(GlueError):
+    pass
+
+
+class UnknownGuardrailRunError(GuardrailError):
+    pass
+
+
+class GuardrailSchemaError(GuardrailError):
+    """GuardrailSpec / CheckSpec 不满足声明 schema（backend 枚举、必填上下文等）。"""
+
+
+class GuardrailStateError(GuardrailError):
+    """GuardrailRun 非法状态操作（固化后提交 / 重复 finalize 等）。"""
+
+
+# ── Challenge（授权三态第三态：结构化授权要求）───────────────────────────────
+
+class ChallengeError(GlueError):
+    pass
+
+
+class UnknownChallengeError(ChallengeError):
+    pass
+
+
+class ChallengeStateError(ChallengeError):
+    """Challenge 非法状态操作（对已决/已过期的 Challenge 再裁决等）。"""
+
+
+# ── 记忆晋升管线（v1.6 4.9 #4：只做"个人→组织"资产晋升）──────────────────────
+
+class PromotionError(GlueError):
+    pass
+
+
+class UnknownPromotionAssetError(PromotionError):
+    pass
+
+
+class PromotionTransitionError(PromotionError):
+    """晋升阶段机非法迁移（跳态 / 回退 / 终态再迁移）。"""
+
+
+# ── 决策记录（append-only）────────────────────────────────────────────────────
+
+class DecisionError(GlueError):
+    pass
+
+
+class DecisionSchemaError(DecisionError):
+    """决策记录字段不合法（chosen 不在 options 中、缺 agent_ref 等）。"""
+
+
+class UnknownDecisionError(DecisionError):
+    pass
+
+
+# ── 产物路由 / 节点容量（便宜三件：environments/、artifact_routes、GPU 份额）──
+
+class RouteError(GlueError):
+    pass
+
+
+class ArtifactRouteUndeclaredError(RouteError):
+    """(pipeline, artifact_kind) 未声明路由——防产物误入 git / 误入 DAM（v1.7 §13）。"""
+
+
+class RouteSchemaError(RouteError):
+    """路由声明字段不合法。"""
+
+
+class CapacitySchemaError(GlueError):
+    """节点容量声明不合法（份额越界 / max_parallel < 1 / 信任等级枚举外）。"""

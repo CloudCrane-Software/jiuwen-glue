@@ -15,6 +15,10 @@
 - **撤销 revoke**：级联——撤销父租约时所有后代租约一并 REVOKED（"级联撤销"），
   未花完的额度随之作废；之后任何占用被拒（LeaseRevokedError）。
 - 所有事件（含被拒绝的占用）追加进 audit 日志：检测 = 拒绝 + 留痕。
+- **权限交集联动（v1.7 §12.5，WO-0003 返工）**：签发时可传入
+  identity.effective_permissions 的求值结果并**固化进租约**（perms 快照 + 三层身份
+  引用）——权限交集公式在租约签发路径上被求值，不是口头原则；派生时强制
+  **逐级收敛不变式**：子租约权限快照 ⊆ 父租约快照，越界派生被拒绝。
 
 额度为抽象整数单位（例如 1/1000 元或 1K token），由调用方约定；本层不做换算。
 """
@@ -32,6 +36,7 @@ from .errors import (
     LeaseRevokedError,
     UnknownLeaseError,
 )
+from .identity import EffectivePerms
 
 ACTIVE = "ACTIVE"
 EXHAUSTED = "EXHAUSTED"
@@ -52,6 +57,7 @@ class LeaseEvent:
     event: str            # GRANT / ACQUIRE / EXPIRE / REVOKE / ACQUIRE_REJECTED / GRANT_REJECTED
     occurred_at: float
     detail: Dict[str, object] = field(default_factory=dict)
+    tenant_id: str = "t0"
 
 
 @dataclass
@@ -66,6 +72,11 @@ class BudgetLease:
     expires_at: Optional[float] = None
     revoked_at: Optional[float] = None
     revoke_reason: Optional[str] = None
+    tenant_id: str = "t0"
+    # ── 签发时固化的身份与权限快照（v1.7 §12.5）───────────────────────────
+    agent_ref: Optional[str] = None                  # 三层复合身份引用（identity.composite_ref）
+    effective_perms: tuple = ()                      # 权限交集快照（签发时求值并冻结）
+    perms_provenance: Dict[str, tuple] = field(default_factory=dict)  # 每一分量出处
 
     def is_expired_at(self, now: float) -> bool:
         return self.expires_at is not None and now >= self.expires_at
@@ -91,8 +102,11 @@ class BudgetLedger:
         return [l for l in self._leases.values() if l.parent_lease_id == lease_id]
 
     def _log(self, lease_id: str, event: str, **detail: object) -> None:
+        lease = self._leases.get(lease_id)
+        tenant = lease.tenant_id if lease is not None else "t0"
         self.audit.append(LeaseEvent(lease_id=lease_id, event=event,
-                                     occurred_at=self._now(), detail=dict(detail)))
+                                     occurred_at=self._now(), detail=dict(detail),
+                                     tenant_id=tenant))
 
     # ── 发放 ─────────────────────────────────────────────────────────────
 
@@ -103,8 +117,19 @@ class BudgetLedger:
         *,
         parent_lease_id: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
+        tenant_id: str = "t0",
+        agent_ref: Optional[str] = None,
+        effective_perms: Optional[EffectivePerms] = None,
     ) -> BudgetLease:
-        """发放租约。parent_lease_id 给出时为"随子任务派生"：额度从父剩余中划出。"""
+        """发放租约。parent_lease_id 给出时为"随子任务派生"：额度从父剩余中划出。
+
+        权限交集联动（v1.7 §12.5）：
+        - ``effective_perms`` 给出时（identity.effective_permissions 的求值结果），
+          其交集快照与分量出处**固化进本租约**——签发即求值，不是口头原则；
+        - 派生场景强制**逐级收敛不变式**：子租约快照 ⊆ 父租约快照——
+          未给 effective_perms 时继承父快照（⊆ 由构造保证）；显式给出但越界
+          （子 ⊄ 父）→ LeaseDerivationError + GRANT_REJECTED 留痕。
+        """
         if not isinstance(amount, int) or amount < 0:
             self._log("-", "GRANT_REJECTED", reason="amount must be a non-negative int", amount=amount)
             raise LeaseDerivationError("amount must be a non-negative int")
@@ -128,6 +153,28 @@ class BudgetLedger:
                       reason="carved out for child lease", carved=amount,
                       remaining=parent.remaining)
 
+        # 权限快照固化 + 逐级收敛不变式（子 ⊆ 父）
+        frozen: tuple = ()
+        provenance: Dict[str, tuple] = {}
+        if effective_perms is not None:
+            frozen = effective_perms.frozen()
+            provenance = {src: tuple(sorted(ps)) for src, ps
+                          in (effective_perms.components or {}).items()}
+        if parent is not None and parent.effective_perms:
+            child_set = set(frozen)
+            if effective_perms is not None and not child_set <= set(parent.effective_perms):
+                beyond = sorted(child_set - set(parent.effective_perms))
+                self._log(parent.lease_id, "GRANT_REJECTED",
+                          reason="derived lease perms exceed upstream "
+                                 "(permissions only converge, never expand)",
+                          beyond_scope=beyond)
+                raise LeaseDerivationError(
+                    f"derived lease perms exceed parent {parent.lease_id}: "
+                    f"out-of-scope {beyond}")
+            if effective_perms is None:
+                frozen = tuple(parent.effective_perms)      # 继承父快照（⊆ 保证）
+                provenance = dict(parent.perms_provenance)
+
         lease = BudgetLease(
             lease_id=uuid.uuid4().hex,
             task_ref=task_ref,
@@ -136,10 +183,15 @@ class BudgetLedger:
             parent_lease_id=parent_lease_id,
             granted_at=now,
             expires_at=(now + ttl_seconds) if ttl_seconds is not None else None,
+            tenant_id=tenant_id or "t0",
+            agent_ref=agent_ref,
+            effective_perms=frozen,
+            perms_provenance=provenance,
         )
         self._leases[lease.lease_id] = lease
         self._log(lease.lease_id, "GRANT", task_ref=task_ref, amount=amount,
-                  parent_lease_id=parent_lease_id, expires_at=lease.expires_at)
+                  parent_lease_id=parent_lease_id, expires_at=lease.expires_at,
+                  agent_ref=agent_ref, perms=len(frozen))
         return lease
 
     # ── 过期 ─────────────────────────────────────────────────────────────
