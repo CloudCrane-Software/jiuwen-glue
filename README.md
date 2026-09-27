@@ -44,7 +44,7 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 ```bash
 pip install -e .          # 或 uv pip install -e .
-python -m pytest          # 主包 196 项测试，全离线（无需数据库/网络）；providers/e2b_compat 与 tools/console-tui 子包另各 41 / 56 项
+python -m pytest          # 主包 222 项测试，全离线（无需数据库/网络）；providers/e2b_compat 与 tools/console-tui 子包另各 41 / 56 项
 ```
 
 ```python
@@ -93,7 +93,7 @@ assert result.executable          # fail-closed：只有 PASS 为 True
 | **e2b_compat Provider**（PROP-0008） | openJiuwen SandboxRegistry 的 E2B 兼容三件套——云突发沙箱接成沙箱新 backend，不改 openjiwen 代码，glue 不新增沙箱决策点；核心零依赖，缺 e2b SDK 时优雅降级报错。**当前为 mock 级交付**（测试全用假客户端，未连真实 E2B 云） | `providers/e2b_compat/`（独立子包） | 41 项 | PROP-0008；v1.7 §12.8；`docs/e2b-compat-provider.md` |
 | **console-tui 治理驾驶舱**（WO-0012） | 治理面作战室 TUI（Textual）：读 glue 库五面板 + 三级受控干预 s/a/p，全部干预经控制台留痕（GuardrailRun Challenge 语义）；无 DSN 时 mock 演示模式；含第三方 TUI 开源项目评估报告（先评估后引进） | `tools/console-tui/`（独立工具包）；`tools/console-tui/docs/{console-tui,tui-research}.md` | 56 项 | v1.7 §12.3；TUI 调研 PROP-0007 |
 
-合并后主包 `python -m pytest` 196 项全绿（91 既有 + 56 fleet + 49 决策层）；`providers/e2b_compat` 与 `tools/console-tui` 各自独立 pytest 全绿（41 / 56）。
+合并后主包 `python -m pytest` 222 项全绿（91 既有 + 56 fleet + 49 决策层 + 17 harness 扩展包 + 5 W-01 回归 + 4 W-02 回归）；`providers/e2b_compat` 与 `tools/console-tui` 各自独立 pytest 全绿（41 / 56）。
 
 ## Postgres DDL
 

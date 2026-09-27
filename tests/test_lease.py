@@ -161,3 +161,71 @@ def test_revoke_cascades_deep_under_expired_mid(clock):
     led.revoke(root.lease_id)
     assert led.status_of(root.lease_id) == REVOKED
     assert led.status_of(leaf.lease_id) == REVOKED
+
+
+# ── W-02 复核修复：空快照也是快照（逐级收敛不变式的空集边界）──────────────────
+
+def test_derived_perms_rejected_when_parent_snapshot_evaluated_empty(clock):
+    """回归（W-02）：父租约权限快照**求值为空集**（交集=空=什么都不允许）时，
+    携带非空快照的派生必须被拒绝——空快照扩张即越界（permissions only converge）。
+    此前实现以真值判断 parent.effective_perms 把空快照当"无快照"，越界派生被放行。"""
+    from jiuwen_glue import EffectivePerms
+
+    led = BudgetLedger(now=clock)
+    parent = led.grant("task-root", 100,
+                       effective_perms=EffectivePerms(perms=frozenset()))
+    assert parent.effective_perms == () and parent.perms_frozen is True
+    with pytest.raises(LeaseDerivationError):
+        led.grant("task-child", 10, parent_lease_id=parent.lease_id,
+                  effective_perms=EffectivePerms(perms=frozenset({"admin:all"})))
+    assert led.children_of(parent.lease_id) == []          # 子未落账
+    assert any(e.event == "GRANT_REJECTED" for e in led.audit)  # 拒绝留痕
+
+
+def test_child_without_perms_inherits_empty_snapshot(clock):
+    """父快照求值为空集、子未声明快照 → 子继承空快照（⊆ 由构造保证，fail-closed）。"""
+    from jiuwen_glue import EffectivePerms
+
+    led = BudgetLedger(now=clock)
+    parent = led.grant("task-root", 100,
+                       effective_perms=EffectivePerms(perms=frozenset()))
+    child = led.grant("task-child", 10, parent_lease_id=parent.lease_id)
+    assert child.effective_perms == () and child.perms_frozen is True
+
+
+def test_derived_perms_under_never_frozen_parent_declares_own_baseline(clock):
+    """如实边界（W-02 固化）：父租约签发时从未传入 effective_perms（无收敛基准），
+    子可声明自己的快照并成为其后代的收敛基线——该情形不做收敛校验，
+    见 leases 模块 docstring"空集边界"说明。"""
+    from jiuwen_glue import EffectivePerms
+
+    led = BudgetLedger(now=clock)
+    parent = led.grant("task-root", 100)                   # 未传 effective_perms
+    assert parent.perms_frozen is False
+    child = led.grant("task-child", 10, parent_lease_id=parent.lease_id,
+                      effective_perms=EffectivePerms(perms=frozenset({"deploy:prod"})))
+    assert child.effective_perms == ("deploy:prod",)
+    grandchild = led.grant("task-gc", 5, parent_lease_id=child.lease_id)
+    assert grandchild.effective_perms == ("deploy:prod",)  # 基线向下继承
+    with pytest.raises(LeaseDerivationError):              # 基线以下照常收敛
+        led.grant("task-beyond", 5, parent_lease_id=child.lease_id,
+                  effective_perms=EffectivePerms(perms=frozenset({"deploy:prod", "admin:all"})))
+
+
+def test_rejected_derivation_leaves_parent_budget_intact(clock):
+    """回归（W-02）：越界派生被拒后父租约剩余额**原封不动**——
+    此前实现先划扣后校验权限，拒绝路径不回滚，父预算凭空蒸发。"""
+    from jiuwen_glue import EffectivePerms
+
+    led = BudgetLedger(now=clock)
+    parent = led.grant("task-root", 100,
+                       effective_perms=EffectivePerms(perms=frozenset({"read:a"})))
+    with pytest.raises(LeaseDerivationError):
+        led.grant("task-child", 30, parent_lease_id=parent.lease_id,
+                  effective_perms=EffectivePerms(perms=frozenset({"write:b"})))
+    assert parent.remaining == 100                      # 零副作用
+    assert led.children_of(parent.lease_id) == []
+    # 合法派生仍正常划扣
+    ok = led.grant("task-ok", 30, parent_lease_id=parent.lease_id,
+                   effective_perms=EffectivePerms(perms=frozenset({"read:a"})))
+    assert parent.remaining == 70 and ok.remaining == 30

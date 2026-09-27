@@ -7,7 +7,9 @@
   **不回写执行面记忆**——本模块没有任何通往原生记忆库的写路径。
 
 阶段机：working → shortlist → promoted（旁支 rejected / withdrawn）
-每次转移必须带理由（reason）与证据引用（evidence_ref）。
+每次转移必须带理由（reason，代码强制非空）；证据引用（evidence_ref）随转移
+留痕、晋升证据绑定 GATE_REJECT/TRANSITION 记录，代码不强制非空（W-02 复核
+如实备注：docstring 原称"必须带理由与证据引用"，实现仅强制 reason）。
 
 三道门（shortlist → promoted，全部通过才可晋升；fail-closed）:
 1. **质量门**：eval 指标达标——指标复用 capabilities 模块的 append-only 单向回流

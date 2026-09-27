@@ -21,6 +21,10 @@
   identity.effective_permissions 的求值结果并**固化进租约**（perms 快照 + 三层身份
   引用）——权限交集公式在租约签发路径上被求值，不是口头原则；派生时强制
   **逐级收敛不变式**：子租约权限快照 ⊆ 父租约快照，越界派生被拒绝。
+  空集快照也是快照：父快照**求值为空**（什么都不允许）时，携带非空快照的
+  派生一律拒绝（W-02 复核修复：空快照扩张即越界）。如实边界：父租约签发时
+  **从未传入** effective_perms（无收敛基准）时，子可声明自己的快照并成为其
+  后代的收敛基线——该情形不做收敛校验（perms_frozen 标志区分两种空）。
 
 额度为抽象整数单位（例如 1/1000 元或 1K token），由调用方约定；本层不做换算。
 """
@@ -78,6 +82,8 @@ class BudgetLease:
     # ── 签发时固化的身份与权限快照（v1.7 §12.5）───────────────────────────
     agent_ref: Optional[str] = None                  # 三层复合身份引用（identity.composite_ref）
     effective_perms: tuple = ()                      # 权限交集快照（签发时求值并冻结）
+    perms_frozen: bool = False                       # 签发时是否传入 effective_perms
+                                                     # （区分"求值为空"与"从未求值"，W-02）
     perms_provenance: Dict[str, tuple] = field(default_factory=dict)  # 每一分量出处
 
     def is_expired_at(self, now: float) -> bool:
@@ -127,10 +133,14 @@ class BudgetLedger:
 
         权限交集联动（v1.7 §12.5）：
         - ``effective_perms`` 给出时（identity.effective_permissions 的求值结果），
-          其交集快照与分量出处**固化进本租约**——签发即求值，不是口头原则；
+          其交集快照与分量出处**固化进本租约**（perms_frozen=True）——签发即求值，
+          不是口头原则；
         - 派生场景强制**逐级收敛不变式**：子租约快照 ⊆ 父租约快照——
           未给 effective_perms 时继承父快照（⊆ 由构造保证）；显式给出但越界
-          （子 ⊄ 父）→ LeaseDerivationError + GRANT_REJECTED 留痕。
+          （子 ⊄ 父）→ LeaseDerivationError + GRANT_REJECTED 留痕；
+          父快照求值为空集时同样参与校验（空集 ⊉ 任何非空 → 拒绝，W-02）；
+        - 父租约从未传入 effective_perms（perms_frozen=False，无收敛基准）时，
+          子可声明自己的快照（W-02 如实边界，见模块 docstring）。
         """
         if not isinstance(amount, int) or amount < 0:
             self._log("-", "GRANT_REJECTED", reason="amount must be a non-negative int", amount=amount)
@@ -150,19 +160,20 @@ class BudgetLedger:
                           requested=amount, parent_remaining=parent.remaining)
                 raise LeaseDerivationError(
                     f"derivation {amount} exceeds parent remaining {parent.remaining}")
-            parent.remaining -= amount
-            self._log(parent.lease_id, "ACQUIRE",
-                      reason="carved out for child lease", carved=amount,
-                      remaining=parent.remaining)
+            # 注意：此处**先不划扣**——划扣放在权限收敛校验之后（W-02 修复：
+            # 此前先扣后校验，越界派生被拒时父剩余额不回滚，额度凭空蒸发）。
 
-        # 权限快照固化 + 逐级收敛不变式（子 ⊆ 父）
+        # 权限快照固化 + 逐级收敛不变式（子 ⊆ 父）。
+        # 收敛校验的触发基准 = 父租约**固化过快照**（effective_perms 非空，或签发时
+        # 明确传入过即 perms_frozen=True——求值为空集也是快照）。父从未固化快照时
+        # 无收敛基准，子可声明自己的快照（如实边界，见模块 docstring）。
         frozen: tuple = ()
         provenance: Dict[str, tuple] = {}
         if effective_perms is not None:
             frozen = effective_perms.frozen()
             provenance = {src: tuple(sorted(ps)) for src, ps
                           in (effective_perms.components or {}).items()}
-        if parent is not None and parent.effective_perms:
+        if parent is not None and (parent.effective_perms or parent.perms_frozen):
             child_set = set(frozen)
             if effective_perms is not None and not child_set <= set(parent.effective_perms):
                 beyond = sorted(child_set - set(parent.effective_perms))
@@ -177,6 +188,13 @@ class BudgetLedger:
                 frozen = tuple(parent.effective_perms)      # 继承父快照（⊆ 保证）
                 provenance = dict(parent.perms_provenance)
 
+        # 全部校验通过后才从父剩余中划扣（"随子任务派生"；拒绝路径零副作用）
+        if parent is not None:
+            parent.remaining -= amount
+            self._log(parent.lease_id, "ACQUIRE",
+                      reason="carved out for child lease", carved=amount,
+                      remaining=parent.remaining)
+
         lease = BudgetLease(
             lease_id=uuid.uuid4().hex,
             task_ref=task_ref,
@@ -188,6 +206,8 @@ class BudgetLedger:
             tenant_id=tenant_id or "t0",
             agent_ref=agent_ref,
             effective_perms=frozen,
+            perms_frozen=(effective_perms is not None)
+                          or (parent is not None and (parent.effective_perms or parent.perms_frozen)),
             perms_provenance=provenance,
         )
         self._leases[lease.lease_id] = lease
