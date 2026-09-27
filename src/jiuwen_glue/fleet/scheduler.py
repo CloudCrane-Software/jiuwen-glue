@@ -28,6 +28,14 @@
 - **GuardrailRun 唯一门控输出被消费**：offering 可携带 guardrail_run_ref +
   verdict；verdict ≠ PASS（含 UNKNOWN/缺失）→ 拒绝派发（fail-closed）。
   本模块不新增第二个决策点。
+- **FEFO 资源压力感知（v2.1 §7 消耗策略，W-04）**：:class:`ResourcePressure`
+  是本模块对"resources 档案投影"的**输入接口**——输入是计量数据对象（不是
+  档案原文）：周限剩余比为主信号（剩余越少压力越大，将过期额度先用），
+  5h 窗剩余 <15% 升权（辅信号）；:func:`pressures_from_meter_rows` 把
+  W-03 计量器五键 NDJSON 行投影为本接口。**影子期（v2.1 施工红线）**：
+  ``assign(..., shadow_fefo=...)`` 只把 FEFO 本应作出的选择记进
+  ``Assignment.choice_trace``（``policy_active=False``），**不改变实际指派**——
+  影子价格与利用率周报上线前，任何调度策略调整只记录不生效。
 
 边界（4.9 #10/#13）：任务对象跨层只传引用（task_ref/payload_ref/artifact_ref
 一律是引用）；调度器只派工单，**不碰 jiuwenswarm control 实例管理 API**——
@@ -39,7 +47,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from ..errors import LeaseError
 from ..guardrail import VERDICT_PASS
@@ -66,6 +74,10 @@ __all__ = [
     "REJECT_GPU", "REJECT_SLOT", "REJECT_OFFLINE", "REJECT_GUARDRAIL",
     "REJECT_STALE", "REJECT_TTL_CAP", "REJECT_QUEUE_EMPTY", "REJECT_LEASE",
     "SCHED_POLICY_GREEDY", "SCHED_POLICY_BEST_FIT", "SCHED_POLICIES",
+    "FEFO_5H_LOW", "FEFO_5H_UPLIFT",
+    "WEEKLY_WINDOW_PREFIX", "FIVE_HOURS_WINDOW_ID",
+    "ResourcePressure", "pressure_score", "rank_key_fefo",
+    "pressures_from_meter_rows",
     "TaskOffering", "Assignment", "Rejected", "ShareLedger",
     "assign", "rank_key_best_fit", "GreedyScheduler", "DispatchMode", "SelfPickMode",
     "WorkOrder", "WorkQueue", "SECRET_REF_PATTERN", "secret_ref_ok",
@@ -188,6 +200,9 @@ class Assignment:
     tenant_id: str = "t0"
     preempt_ok: bool = False              # offering 抢占声明的落账回声（语义 [待]，
                                           # 本工单只随账记录，不触发驱逐）
+    choice_trace: Optional[Dict[str, object]] = None   # 影子期策略轨迹（FEFO 等）：
+                                          # 只记录"策略本会怎么选"，不改实际指派
+                                          # （v2.1 红线：影子期只记录不生效）
 
 
 @dataclass(frozen=True)
@@ -296,10 +311,180 @@ def rank_key_best_fit(record: NodeRecord, ledger: Optional[ShareLedger],
     return (leftover, -cap.gpu_priority, cap.node_id)
 
 
+# ── FEFO 资源压力（v2.1 §7 消耗策略，W-04）────────────────────────────────────
+#
+# FEFO（First-Expired-First-Out）：周限额先到期的资源先用——把"即将随窗口重置而
+# 作废的额度"先烧掉。主信号 = weekly_remaining_ratio（周限剩余比，越低压力越大）；
+# 辅信号 = 5h 窗剩余 <15% 时升权（该窗口余额即将随滚动重置而蒸发，先用掉）。
+# 阈值属**软项**：owner 经验 bootstrap，计量数据周重拟合（决策域 thresholds 投影）。
+
+FEFO_5H_LOW = 0.15          # 辅信号阈值：5h 窗剩余 <15% 触发升权（v2.1 §7）
+FEFO_5H_UPLIFT = 0.25       # 升权增量（加到压力分上，封顶 1.0）
+WEEKLY_WINDOW_PREFIX = "weekly"        # 计量行 window_id 前缀 → 主信号
+FIVE_HOURS_WINDOW_ID = "five_hours"    # 计量行 window_id 前缀 → 辅信号
+
+
+@dataclass(frozen=True)
+class ResourcePressure:
+    """FEFO 输入接口：**计量数据对象**（resources 档案的投影，非档案原文）。
+
+    来源链：company-ops/resources/<id>.yaml（window.limit 投影出 limit）
+    → W-03 计量器五键 NDJSON（usage_events）→ :func:`pressures_from_meter_rows`
+    → 本对象 → 调度排序。缺读数（None）= 中性处理，不因缺计量而排序靠前。
+    """
+
+    node_id: str                                   # 调度器节点标识
+    resource_id: str = ""                          # 来源档案 resource_id（可溯）
+    weekly_remaining_ratio: Optional[float] = None # 主信号 0.0–1.0；None=无读数
+    window_5h_remaining: Optional[float] = None    # 辅信号 0.0–1.0；None=无读数
+    as_of: float = 0.0                             # 投影时刻（epoch 秒；0=未记）
+    source: str = "usage_events"                   # 计量来源（对齐档案 source 纪律）
+
+    def __post_init__(self) -> None:
+        if not self.node_id or not isinstance(self.node_id, str):
+            raise SchedulingError("ResourcePressure.node_id must be a non-empty str")
+        for name in ("weekly_remaining_ratio", "window_5h_remaining"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or \
+                    not (0.0 <= float(value) <= 1.0):
+                raise SchedulingError(
+                    f"ResourcePressure.{name} must be None or float in [0.0, 1.0], "
+                    f"got {value!r}")
+
+
+def pressure_score(pressure: Optional[ResourcePressure]) -> float:
+    """FEFO 压力分 0.0–1.0（越高 = 越该先把活派给它）。
+
+    主信号：``1 − weekly_remaining_ratio``（周限剩余越少压力越大）；
+    辅信号：``window_5h_remaining < FEFO_5H_LOW`` 时加 ``FEFO_5H_UPLIFT``（封顶 1.0）。
+    ``None``（无计量读数）按中性 0 计——缺数据不制造优先级。
+    """
+    if pressure is None:
+        return 0.0
+    weekly = pressure.weekly_remaining_ratio
+    score = (1.0 - float(weekly)) if weekly is not None else 0.0
+    w5 = pressure.window_5h_remaining
+    if w5 is not None and float(w5) < FEFO_5H_LOW:
+        score = min(1.0, score + FEFO_5H_UPLIFT)
+    return round(score, 9)
+
+
+def rank_key_fefo(record: NodeRecord,
+                  pressure: Optional[ResourcePressure]) -> Tuple[float, ...]:
+    """FEFO 排序键：压力**降序**（压力大者先派）→ node_id 升序（确定性 tie-break）。
+
+    只对已过过滤链的候选求值；与 :func:`rank_key_best_fit` 一样是纯排序键，
+    在影子期只用于 choice_trace 计算，不进入实际指派（v2.1 红线）。
+    """
+    return (-pressure_score(pressure), record.capacity.node_id)
+
+
+def pressures_from_meter_rows(
+        rows: Any,
+        *,
+        limits: Optional[Any] = None,
+        node_map: Optional[Any] = None,
+        now: Optional[float] = None) -> Dict[str, ResourcePressure]:
+    """W-03 计量行（五键 NDJSON 逐行 dict）→ FEFO 输入投影。
+
+    输入（计量数据对象，不是资源档案原文）：
+    - ``rows``：每行至少 ``resource``/``window_id``/``value``；``value`` 语义 =
+      该窗口**已用量**（W-03 计量器口径）。``window_id`` 以 ``weekly`` 或
+      ``monthly`` 前缀（含 ``-<周期后缀>``）计入主信号（只有月窗的资源——如
+      cnb-sandbox 1600 核时/月——以月窗燃尽度作周限主信号的口径）；以
+      ``five_hours`` 前缀计入辅信号；行内显式带 ``remaining_ratio``（0.0–1.0）
+      时**优先直读**（计量器可直接输出剩余比，跳过 limit 换算）。
+    - ``limits``：``{resource_id: {窗口id: 限额}}``——resources 档案
+      ``window.limit`` 的投影（如 ``{"cnb-sandbox": {"monthly": 1600}}``）。
+      周限主信号的限额取该资源映射里**第一个**键以 ``weekly``/``monthly``
+      开头的窗口；5h 辅信号取 ``five_hours`` 窗。缺限额 → 该信号 None（中性）。
+    - ``node_map``：``{resource_id: node_id}`` 档案→调度节点投影；缺省 resource_id
+      即 node_id。
+    - ``now``：写入 ``ResourcePressure.as_of``（epoch 秒）；None → 0.0。
+
+    返回 ``{node_id: ResourcePressure}``；**两个信号都无读数**的资源不投影
+    （全缺口行不投影——调用方 ``.get(node_id)`` 得 None = 中性 0 压力）。
+    """
+    limits = limits or {}
+    node_map = node_map or {}
+    used: Dict[str, Dict[str, float]] = {}
+    explicit: Dict[str, Dict[str, float]] = {}    # 行内直读的 remaining_ratio
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        resource = row.get("resource")
+        window_id = row.get("window_id")
+        if not resource or not window_id:
+            continue
+        window_id = str(window_id)
+        kind = None
+        if window_id == WEEKLY_WINDOW_PREFIX or \
+                window_id.startswith(WEEKLY_WINDOW_PREFIX + "-") or \
+                window_id == "monthly" or window_id.startswith("monthly-"):
+            kind = "weekly"
+        elif window_id == FIVE_HOURS_WINDOW_ID or \
+                window_id.startswith(FIVE_HOURS_WINDOW_ID + "-"):
+            kind = "five_hours"
+        if kind is None:
+            continue
+        resource = str(resource)
+        ratio = row.get("remaining_ratio")
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and \
+                0.0 <= float(ratio) <= 1.0:
+            explicit.setdefault(resource, {}).setdefault(kind, float(ratio))
+            continue                      # 直读行优先，不再当已用量换算
+        entry = used.setdefault(resource, {})
+        value = row.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue                      # 缺口行（value=null）如实忽略，不投影
+        if entry.get(kind) is None:
+            entry[kind] = float(value)    # 同窗口多行取首行；聚合归装载器/周重拟合
+    pressures: Dict[str, ResourcePressure] = {}
+    for resource in sorted(set(used) | set(explicit)):
+        signals = used.get(resource) or {}
+        weekly_ratio: Optional[float] = None
+        five_hours_ratio: Optional[float] = None
+        resource_limits = limits.get(resource) or {}
+        weekly_limit = next((float(v) for k, v in sorted(resource_limits.items())
+                             if k == "weekly" or k.startswith("weekly-")
+                             or k == "monthly" or k.startswith("monthly-")), None)
+        five_hours_limit = next((float(v) for k, v in sorted(resource_limits.items())
+                                 if k == FIVE_HOURS_WINDOW_ID
+                                 or k.startswith(FIVE_HOURS_WINDOW_ID + "-")), None)
+        used_weekly = signals.get("weekly")
+        if used_weekly is not None:
+            weekly_ratio = (max(0.0, 1.0 - used_weekly / weekly_limit)
+                            if weekly_limit and weekly_limit > 0 else None)
+        used_5h = signals.get("five_hours")
+        if used_5h is not None:
+            five_hours_ratio = (max(0.0, 1.0 - used_5h / five_hours_limit)
+                                if five_hours_limit and five_hours_limit > 0 else None)
+        # 行内直读的剩余比优先于"已用量/限额"换算（计量器直报口径）
+        resource_explicit = explicit.get(resource) or {}
+        if "weekly" in resource_explicit:
+            weekly_ratio = resource_explicit["weekly"]
+        if "five_hours" in resource_explicit:
+            five_hours_ratio = resource_explicit["five_hours"]
+        if weekly_ratio is None and five_hours_ratio is None:
+            continue                      # 全缺口/全无读数 → 不投影（中性缺席）
+        pressures[node_map.get(resource, resource)] = ResourcePressure(
+            node_id=node_map.get(resource, resource),
+            resource_id=resource,
+            weekly_remaining_ratio=weekly_ratio,
+            window_5h_remaining=five_hours_ratio,
+            as_of=float(now) if now is not None else 0.0,
+        )
+    return pressures
+
+
 def assign(offering: TaskOffering, registry: FleetRegistry, *,
            ledger: Optional[ShareLedger] = None,
            now: Optional[float] = None,
-           policy: str = SCHED_POLICY_GREEDY) -> Union[Assignment, Rejected]:
+           policy: str = SCHED_POLICY_GREEDY,
+           shadow_fefo: Optional[Mapping[str, ResourcePressure]] = None
+           ) -> Union[Assignment, Rejected]:
     """派工（纯决策 + 可选落账）。``policy``：``greedy``（P1，默认）|
     ``best-fit``（P2 bin-packing，见 :func:`rank_key_best_fit`）；
     未知策略名 → SchedulingError（fail-closed，不静默回退）。
@@ -307,6 +492,12 @@ def assign(offering: TaskOffering, registry: FleetRegistry, *,
     过滤 → 排序取首；无可派节点 → Rejected（含各过滤器命中计数）。
     ``ledger`` 缺省为 None = 只决策不落账（dry-run 语义）；
     :class:`GreedyScheduler` 总是传入共享账本完成真实记账。
+
+    ``shadow_fefo``（FEFO 影子期，v2.1 施工红线）：传入
+    ``{node_id: ResourcePressure}`` 计量投影时，实际指派**仍完全由 ``policy``
+    决定**；FEFO 在同一批过过滤链的候选上计算的排序只写进
+    ``Assignment.choice_trace``（``policy_active=False``）——影子价格与利用率
+    周报上线前，任何调度策略调整只记录不生效。
     """
     now = time.time() if now is None else now
     if policy not in SCHED_POLICIES:
@@ -319,6 +510,7 @@ def assign(offering: TaskOffering, registry: FleetRegistry, *,
                    f"{VERDICT_PASS!r} — fail-closed (UNKNOWN included)",
             detail={"guardrail_run_ref": offering.guardrail_run_ref})
     counts: Dict[str, int] = {}
+    eligible: List[NodeRecord] = []
     best: Optional[NodeRecord] = None
     best_key: Optional[Tuple[float, ...]] = None
     for record in registry.active_nodes():
@@ -329,6 +521,7 @@ def assign(offering: TaskOffering, registry: FleetRegistry, *,
         if reason is not None:
             counts[reason] = counts.get(reason, 0) + 1
             continue
+        eligible.append(record)
         key = (_rank_key(record, ledger) if policy == SCHED_POLICY_GREEDY
                else rank_key_best_fit(record, ledger, offering.gpu_demand))
         if best is None or key < best_key:
@@ -357,6 +550,31 @@ def assign(offering: TaskOffering, registry: FleetRegistry, *,
         tenant_id=offering.tenant_id,
         preempt_ok=offering.preempt_ok,
     )
+    if shadow_fefo is not None and eligible:
+        # 影子期：FEFO 只留轨迹，不碰 best（v2.1 红线——只记录不生效）。
+        ranking = sorted(eligible,
+                         key=lambda r: rank_key_fefo(r, shadow_fefo.get(r.capacity.node_id)))
+        assignment.choice_trace = {
+            "shadow": True,
+            "policy_active": False,
+            "policy": "fefo",
+            "effective_policy": policy,
+            "effective_choice": best.capacity.node_id,
+            "fefo_choice": ranking[0].capacity.node_id,
+            "fefo_ranking": [
+                {"node_id": r.capacity.node_id,
+                 "pressure": pressure_score(shadow_fefo.get(r.capacity.node_id)),
+                 "weekly_remaining_ratio": (
+                     shadow_fefo[r.capacity.node_id].weekly_remaining_ratio
+                     if r.capacity.node_id in shadow_fefo else None),
+                 "window_5h_remaining": (
+                     shadow_fefo[r.capacity.node_id].window_5h_remaining
+                     if r.capacity.node_id in shadow_fefo else None),
+                 } for r in ranking],
+            "note": "shadow period (v2.1 red line): FEFO records choice_trace "
+                    "only; actual assignment unchanged until shadow price and "
+                    "utilization weekly report are live",
+        }
     if ledger is not None:
         ledger.commit(assignment.assignment_id, best.node_id,
                       offering.gpu_demand)
@@ -527,7 +745,9 @@ class GreedyScheduler:
     def assign(self, offering: TaskOffering, *, dispatch: str = DISPATCH_DIRECT,
                lease_ttl: Optional[float] = None,
                now: Optional[float] = None,
-               policy: Optional[str] = None) -> Union[Assignment, Rejected]:
+               policy: Optional[str] = None,
+               shadow_fefo: Optional[Mapping[str, ResourcePressure]] = None
+               ) -> Union[Assignment, Rejected]:
         now = self._now() if now is None else now
         if dispatch not in (DISPATCH_DIRECT, DISPATCH_SELF_PICK):
             raise SchedulingError(f"unknown dispatch mode: {dispatch!r}")
@@ -544,7 +764,7 @@ class GreedyScheduler:
         else:
             ttl = None
         result = assign(offering, self._registry, ledger=self._ledger, now=now,
-                        policy=policy or self.policy)
+                        policy=policy or self.policy, shadow_fefo=shadow_fefo)
         if isinstance(result, Rejected):
             self.audit.append({"event": "ASSIGN_REJECTED", "at": now,
                                "task_ref": offering.task_ref,
@@ -584,7 +804,9 @@ class GreedyScheduler:
                            "task_ref": offering.task_ref,
                            "node_id": result.node_id, "dispatch": dispatch,
                            "gpu_frac": result.gpu_frac_committed,
-                           "review_required": result.review_required})
+                           "review_required": result.review_required,
+                           "fefo_shadow_choice": (result.choice_trace or {})
+                                                 .get("fefo_choice")})
         return result
 
     # ── 释放 / 完成 / 超时 ───────────────────────────────────────────────
