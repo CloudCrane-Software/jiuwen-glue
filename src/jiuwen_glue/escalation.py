@@ -12,7 +12,8 @@
 - 风暴防护三参数（:class:`StormGuard`）：每级最大尝试（max_attempts_per_level，
   同级同签名重试到顶即强制升级，继续原地尝试被拒）/ 向下回退 ≤1
   （max_downgrades，防上下震荡）/ 签名去重限流（dedup_window_seconds，
-  同任务同签名在窗口内的重复升级被拒）；
+  同任务同签名在窗口内的重复升级被拒）；另有两条补充防线（grok 红队 R1
+  复判后加）：级内总量上限（签名购物防护）与相邻升级最小步进间隔（连跳防护）；
 - 组织学习：**同类签名 3 次 → 自动开权限扩展提案对象**
   （:class:`PermissionExpansionProposal`，跨任务累计；提案只登记不授权——
   扩权属人类硬清单，v2.1 §4.5 不对称设计，本模块永远不发放权限）；
@@ -116,20 +117,38 @@ class UnknownEscalationCaseError(EscalationError):
 
 @dataclass(frozen=True)
 class StormGuard:
-    """风暴防护三参数（v2.1 §4.7"级内限次/回退≤1/签名去重"）+ 签名提案阈值。"""
+    """风暴防护三参数（v2.1 §4.7"级内限次/回退≤1/签名去重"）+ 签名提案阈值
+    + 两条补充防线（grok 红队 R1 复判后加，2026-09-28）：
+
+    - ``max_total_attempts_per_level``：级内**总量**上限（不分签名）——堵"换
+      blocker 字段刷新签名重置计数"的签名购物路径（R1-F2 实证成立）；
+    - ``min_step_interval_seconds``：同一 case 相邻两次升级的最小步进间隔
+      （不看签名与层级）——堵去重窗口内 L0→L4 秒级连跳（R1-F3 实证成立；
+      逐级爬升本身合法，只是必须给各级留出真实处理时间）。
+    """
 
     max_attempts_per_level: int = 3      # 每级最大尝试（同签名同级）
+    max_total_attempts_per_level: int = 9  # 每级总量上限（不分签名；R1-F2 补充防线）
     max_downgrades: int = 1              # 向下回退 ≤1（每个 case 一生）
     dedup_window_seconds: float = 600.0  # 签名去重限流窗口（同任务同签名同源层级）
+    min_step_interval_seconds: float = 60.0  # 相邻两次升级最小间隔（R1-F3 补充防线）
     signature_threshold: int = 3         # 同类签名 N 次 → 权限扩展提案（组织学习）
 
     def __post_init__(self) -> None:
         if not isinstance(self.max_attempts_per_level, int) or self.max_attempts_per_level < 1:
             raise EscalationSchemaError("max_attempts_per_level must be a positive int")
+        if (not isinstance(self.max_total_attempts_per_level, int)
+                or self.max_total_attempts_per_level < self.max_attempts_per_level):
+            raise EscalationSchemaError(
+                "max_total_attempts_per_level must be an int >= max_attempts_per_level")
         if not isinstance(self.max_downgrades, int) or self.max_downgrades < 0:
             raise EscalationSchemaError("max_downgrades must be a non-negative int")
         if not isinstance(self.dedup_window_seconds, (int, float)) or self.dedup_window_seconds < 0:
             raise EscalationSchemaError("dedup_window_seconds must be a non-negative number")
+        if (not isinstance(self.min_step_interval_seconds, (int, float))
+                or self.min_step_interval_seconds < 0):
+            raise EscalationSchemaError(
+                "min_step_interval_seconds must be a non-negative number")
         if not isinstance(self.signature_threshold, int) or self.signature_threshold < 1:
             raise EscalationSchemaError("signature_threshold must be a positive int")
 
@@ -185,8 +204,10 @@ class EscalationCase:
     level: str = LEVEL_L0
     downgrades_used: int = 0
     attempts: Dict[Tuple[str, str], int] = field(default_factory=dict)  # (level, signature) → 次数
+    level_totals: Dict[str, int] = field(default_factory=dict)  # level → 总尝试数（不分签名，R1-F2）
     last_escalation_at: Dict[Tuple[str, str], float] = field(default_factory=dict)
     #                                    ^ (from_level, signature) → 最近升级时刻（签名去重限流键）
+    last_escalation_any: Optional[float] = None   # 最近一次升级时刻（步进间隔键，R1-F3）
     history: List[str] = field(default_factory=list)                    # escalation_id 顺序
     opened_at: float = 0.0
     ready_package: Optional["ReadinessPackage"] = None  # 最近一次就绪包（L4→L5 闸）
@@ -432,8 +453,13 @@ class EscalationLedger:
     # ── 级内尝试（级内限次的计数入口）─────────────────────────────────────
 
     def attempt(self, task_ref: str, blocker: Mapping[str, Any]) -> int:
-        """记录一次本级的权限内尝试（同签名）。到达级内限次后继续尝试 →
-        EscalationRequiredError（必须升级，原地重试被拒并留痕）。"""
+        """记录一次本级的权限内尝试（同签名）。两级上限：
+
+        - 同签名同级打到 ``max_attempts_per_level`` → 拒（级内限次，v2.1 §4.7）；
+        - 本级**总量**（不分签名）打到 ``max_total_attempts_per_level`` → 拒
+          （签名购物防护：换 blocker 字段刷新签名无法重置计数，grok 红队 R1-F2）。
+        到顶后继续尝试一律 EscalationRequiredError（必须升级，原地重试被拒并留痕）。
+        """
         if not task_ref:
             raise MissingTaskReferenceError("attempt requires a task_ref")
         sig = signature_for(blocker)
@@ -442,6 +468,7 @@ class EscalationLedger:
             case = self._open_case(task_ref)
         key = (case.level, sig)
         count = case.attempts.get(key, 0)
+        total = case.level_totals.get(case.level, 0)
         if count >= self.guard.max_attempts_per_level:
             self._log("ATTEMPT_REJECTED", task_ref, level=case.level, signature=sig,
                       count=count, cap=self.guard.max_attempts_per_level,
@@ -450,10 +477,19 @@ class EscalationLedger:
                 f"task {task_ref} already made {count} attempt(s) at {case.level} for "
                 f"signature {sig[:12]}… (cap={self.guard.max_attempts_per_level}); "
                 "escalate instead of retrying")
-        count += 1
-        case.attempts[key] = count
-        self._log("ATTEMPT", task_ref, level=case.level, signature=sig, count=count)
-        return count
+        if total >= self.guard.max_total_attempts_per_level:
+            self._log("ATTEMPT_REJECTED", task_ref, level=case.level, signature=sig,
+                      total=total, cap_total=self.guard.max_total_attempts_per_level,
+                      reason="per-level total attempt cap reached "
+                             "(signature-shopping guard, R1-F2)")
+            raise EscalationRequiredError(
+                f"task {task_ref} already made {total} attempt(s) at {case.level} across "
+                f"all signatures (total cap={self.guard.max_total_attempts_per_level}); "
+                "varying the blocker does not reset the storm guard")
+        case.attempts[key] = count + 1
+        case.level_totals[case.level] = total + 1
+        self._log("ATTEMPT", task_ref, level=case.level, signature=sig, count=count + 1)
+        return count + 1
 
     # ── 升级（唯一上行入口；显式声明增量）─────────────────────────────────
 
@@ -499,6 +535,18 @@ class EscalationLedger:
             raise EscalationSchemaError(
                 "escalation must declare a positive time_budget_seconds")
 
+        # 风暴防护补充②（grok 红队 R1-F3）：相邻两次升级的最小步进间隔——
+        # 同 case 全局计数，不看签名与层级；去重窗口内"换层级秒级连跳 L0→L4"在此被拦。
+        if (case.last_escalation_any is not None
+                and (now - case.last_escalation_any) < self.guard.min_step_interval_seconds):
+            self._log("ESCALATE_REJECTED", task_ref, reason="min step interval",
+                      elapsed=now - case.last_escalation_any,
+                      min_interval=self.guard.min_step_interval_seconds)
+            raise EscalationStormError(
+                f"task {task_ref} escalated {now - case.last_escalation_any:.0f}s ago "
+                f"(< min step interval {self.guard.min_step_interval_seconds:.0f}s); "
+                "each ladder step needs real processing time (storm guard, R1-F3)")
+
         # 风暴防护：签名去重限流——键 =（本升级源层级, 签名）。拦截"降级后原级重升"
         # 与"多 worker 重复触发"同签名风暴；逐级爬升（每次 from_level 不同）不受限。
         last = case.last_escalation_at.get((case.level, sig))
@@ -511,7 +559,8 @@ class EscalationLedger:
                 f"{sig[:12]}… {now - last:.0f}s ago (< dedup window "
                 f"{self.guard.dedup_window_seconds:.0f}s)")
 
-        # L4→L5 闸：人类就绪包 READY 才放行
+        # L4→L5 闸：人类就绪包 READY 且**绑定当前 blocker 签名**才放行
+        # （grok 红队 R1-F1：签名不匹配的旧包不能为别的 blocker 开门——fail-closed）。
         if to_level == LEVEL_L5:
             pkg = case.ready_package
             if pkg is None or not pkg.ready or pkg.task_ref != task_ref:
@@ -521,6 +570,15 @@ class EscalationLedger:
                 raise EscalationStateError(
                     f"L4→L5 requires a READY readiness package for {task_ref}; "
                     f"missing pieces: {missing} (fail-closed)")
+            if pkg.signature != sig:
+                self._log("ESCALATE_REJECTED", task_ref,
+                          reason="readiness package signature mismatch",
+                          package_signature=pkg.signature, current_signature=sig)
+                raise EscalationStateError(
+                    f"readiness package for {task_ref} is bound to blocker signature "
+                    f"{pkg.signature[:12]}… but this escalation carries "
+                    f"{sig[:12]}… — re-render the package for the current blocker "
+                    "(fail-closed, R1-F1)")
 
         esc = Escalation(
             escalation_id=uuid.uuid4().hex, task_ref=task_ref,
@@ -532,6 +590,7 @@ class EscalationLedger:
         case.level = to_level
         case.history.append(esc.escalation_id)
         case.last_escalation_at[(esc.from_level, sig)] = now
+        case.last_escalation_any = now
         self._log("ESCALATE", task_ref, escalation_id=esc.escalation_id,
                   from_level=esc.from_level, to_level=to_level, signature=sig,
                   added_context=esc.added_context, added_tools=esc.added_tools,

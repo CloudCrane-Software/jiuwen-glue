@@ -31,14 +31,21 @@ from jiuwen_glue.escalation import (
 BLOCKER = {"error": "PermissionDenied", "resource": "prod/release/17", "action": "deploy"}
 
 
-def _climb(led: EscalationLedger, task_ref: str, blocker=BLOCKER, upto: str = LEVEL_L4):
-    """从 L0（自动开 case）逐级爬到 upto：每级打满级内限次再升级（同一 blocker 签名贯穿）。"""
+def _climb(led: EscalationLedger, task_ref: str, blocker=BLOCKER, upto: str = LEVEL_L4,
+           clock=None):
+    """从 L0（自动开 case）逐级爬到 upto：每级打满级内限次再升级（同一 blocker 签名贯穿）。
+
+    clock 给出时在每次升级前推过最小步进间隔（生产里每一级都有真实处理时间；
+    红队 R1-F3 补充防线要求相邻两次升级不得发生在同一瞬间）。
+    """
     led.attempt(task_ref, blocker)                       # 自动开 case（计入当前级）
     while led.level_of(task_ref) != upto:
         case = led.case_of(task_ref)
         key = (case.level, signature_for(blocker))
         while case.attempts.get(key, 0) < led.guard.max_attempts_per_level:
             led.attempt(task_ref, blocker)
+        if clock is not None:
+            clock.advance(led.guard.min_step_interval_seconds + 1)
         led.escalate(task_ref, blocker, added_context=("logs:prod",),
                      added_tools=("kubectl",), time_budget_seconds=1800,
                      reason="per-level cap hit")
@@ -62,7 +69,7 @@ def test_ladder_is_six_levels_with_declared_roles():
     assert "human-hard-list" in LEVEL_CAPABILITIES[LEVEL_L5]
 
 
-def test_escalation_is_a_single_step_and_attaches_task_ref(ledger):
+def test_escalation_is_a_single_step_and_attaches_task_ref(ledger, clock):
     """升级单步推进且升级对象挂工单（task_ref 引用 + 显式增量声明）。"""
     esc = ledger.escalate("wo-100", BLOCKER, added_context=("logs:prod",),
                           added_tools=("kubectl",), time_budget_seconds=900,
@@ -73,6 +80,7 @@ def test_escalation_is_a_single_step_and_attaches_task_ref(ledger):
     assert esc.added_tools == ("kubectl",)
     assert esc.time_budget_seconds == 900.0
     assert ledger.level_of("wo-100") == "L1"
+    clock.advance(ledger.guard.min_step_interval_seconds + 1)
     esc2 = ledger.escalate("wo-100", BLOCKER, time_budget_seconds=900)   # 单步：L1→L2
     assert (esc2.from_level, esc2.to_level) == ("L1", "L2")
     assert ledger.escalation_of(esc.escalation_id).task_ref == "wo-100"  # 台账可回查
@@ -127,6 +135,7 @@ def test_downgrade_allowed_once_then_storm_rejected(clock):
         led.downgrade("wo-300")
     clock.advance(led.guard.dedup_window_seconds + 1)
     led.escalate("wo-300", BLOCKER, time_budget_seconds=60)     # L0→L1（窗口外）
+    clock.advance(led.guard.min_step_interval_seconds + 1)
     led.escalate("wo-300", BLOCKER, time_budget_seconds=60)     # L1→L2
     with pytest.raises(EscalationStormError):                   # 回退 ≤1 已用尽
         led.downgrade("wo-300")                                 # case 一生只回退一次
@@ -150,6 +159,8 @@ def test_signature_dedup_blocks_same_source_level_repeat_not_ladder_climb(clock)
     clock.advance(led.guard.dedup_window_seconds + 1)
     led.escalate("wo-400", BLOCKER, time_budget_seconds=60)     # 窗口外放行
     # 逐级爬升同签名不受限：L1→L2 与 L0→L1 源层级不同，不在去重键内
+    # （但受最小步进间隔约束——真实爬升必须有时间流逝，R1-F3）
+    clock.advance(led.guard.min_step_interval_seconds + 1)
     led.escalate("wo-400", BLOCKER, time_budget_seconds=60)
     assert led.level_of("wo-400") == "L2"
 
@@ -163,12 +174,14 @@ def test_three_same_signatures_open_permission_expansion_proposal(clock):
     for task in ("wo-a", "wo-b", "wo-c"):
         led.escalate(task, BLOCKER, added_context=("logs:prod",),
                      added_tools=("kubectl",), time_budget_seconds=60)
+        clock.advance(led.guard.min_step_interval_seconds + 1)   # 每次升级时间推进（R1-F3）
     assert len(led.proposals) == 1
     p = led.proposals[signature_for(BLOCKER)]
     assert p.occurrences == 3 and p.state == "OPEN"
     assert p.task_refs == ("wo-a", "wo-b", "wo-c")
     assert p.scope_requested == ("logs:prod",) and p.tools_requested == ("kubectl",)
     # 第 4 次：bump 同一提案（不重复开），仍然只是登记
+    clock.advance(led.guard.min_step_interval_seconds + 1)
     led.escalate("wo-d", BLOCKER, time_budget_seconds=60)
     assert len(led.proposals) == 1
     assert led.proposals[signature_for(BLOCKER)].occurrences == 4
@@ -209,10 +222,10 @@ def _ready_task(task_ref="wo-700", category=HARD_IRREVERSIBLE, facts=True, rev=T
                        if rev else None))
 
 
-def test_readiness_full_package_passes_all_four_pieces(ledger):
+def test_readiness_full_package_passes_all_four_pieces(ledger, clock):
     """四件套齐 → PASS：事实固定/范畴清晰/权限内无解/L4 可逆性评估全过，
     且包挂工单 + 决策记录引用。"""
-    _climb(ledger, "wo-700")
+    _climb(ledger, "wo-700", clock=clock)
     pkg = ledger.readiness(_ready_task())
     assert [p.key for p in pkg.pieces] == [
         "facts_fixed", "category_clear", "in_permission_no_solution", "reversibility"]
@@ -221,9 +234,9 @@ def test_readiness_full_package_passes_all_four_pieces(ledger):
     assert pkg.task_ref == "wo-700" and pkg.category == HARD_IRREVERSIBLE
 
 
-def test_readiness_blocked_when_any_field_missing(ledger):
+def test_readiness_blocked_when_any_field_missing(ledger, clock):
     """字段不齐 = BLOCKED 不放行（fail-closed 聚合：任一件 BLOCKED → 全包 BLOCKED）。"""
-    _climb(ledger, "wo-710")
+    _climb(ledger, "wo-710", clock=clock)
     pkg = ledger.readiness(_ready_task("wo-710", facts=False))
     assert not pkg.ready and "facts_fixed" in pkg.missing
     pkg = ledger.readiness(_ready_task("wo-710", rev=False))
@@ -243,16 +256,16 @@ def test_readiness_in_permission_proof_requires_every_level_exhausted(clock):
     led = EscalationLedger(now=clock)
     led.attempt("wo-720", BLOCKER)                       # L0 只试 1 次（< 3）
     led.escalate("wo-720", BLOCKER, time_budget_seconds=60)
-    _climb(led, "wo-720")                                # 直达 L4（L1 起打满）
+    _climb(led, "wo-720", clock=clock)                                # 直达 L4（L1 起打满）
     pkg = led.readiness(_ready_task("wo-720"))
     assert not pkg.ready
     piece = next(p for p in pkg.pieces if p.key == "in_permission_no_solution")
     assert piece.verdict == "BLOCKED" and "L0" in piece.detail
 
 
-def test_readiness_category_outside_hard_list_knocks_back_to_l3(ledger):
+def test_readiness_category_outside_hard_list_knocks_back_to_l3(ledger, clock):
     """四类硬清单之外 → 范畴件 BLOCKED，knock_back_to_l3=True（不在表内打回 L3）。"""
-    _climb(ledger, "wo-730")
+    _climb(ledger, "wo-730", clock=clock)
     pkg = ledger.readiness(_ready_task("wo-730", category="style_preference"))
     piece = next(p for p in pkg.pieces if p.key == "category_clear")
     assert piece.verdict == "BLOCKED" and "L3" in piece.detail
@@ -260,9 +273,9 @@ def test_readiness_category_outside_hard_list_knocks_back_to_l3(ledger):
     assert set(HARD_LIST) == {"money", "legal_tos", "irreversible", "theory_approval"}
 
 
-def test_readiness_reversibility_requires_rollback_ref_when_reversible(ledger):
+def test_readiness_reversibility_requires_rollback_ref_when_reversible(ledger, clock):
     """可逆性评估：声称可逆就必须给回滚引用；不可逆只需评估本身在场。"""
-    _climb(ledger, "wo-740")
+    _climb(ledger, "wo-740", clock=clock)
     pkg = ledger.readiness(_ready_task("wo-740", rev=False))
     assert not pkg.ready and "reversibility" in pkg.missing      # 缺评估
     bad = ReadinessTask(task_ref="wo-740", title="x",
@@ -290,16 +303,20 @@ def test_escalate_to_l5_requires_ready_readiness_package(clock):
     """fail-closed 主闸：无包 / 包不齐 / 范畴表外 → L4→L5 一律拒绝；
     READY 后放行；L5 是阶梯终点。"""
     led = EscalationLedger(now=clock)
-    _climb(led, "wo-800")
+    _climb(led, "wo-800", clock=clock)
     with pytest.raises(EscalationStateError):            # 未 render 包
+        clock.advance(led.guard.min_step_interval_seconds + 1)   # 每次尝试都在间隔外（R1-F3）
         led.escalate("wo-800", BLOCKER, time_budget_seconds=60)
     led.readiness(_ready_task("wo-800", facts=False))    # 包不齐 → BLOCKED 登记
     with pytest.raises(EscalationStateError):
+        clock.advance(led.guard.min_step_interval_seconds + 1)
         led.escalate("wo-800", BLOCKER, time_budget_seconds=60)
     led.readiness(_ready_task("wo-800", category="tone_of_voice"))  # 表外范畴
     with pytest.raises(EscalationStateError):
+        clock.advance(led.guard.min_step_interval_seconds + 1)
         led.escalate("wo-800", BLOCKER, time_budget_seconds=60)
     led.readiness(_ready_task("wo-800"))                 # 四件套齐
+    clock.advance(led.guard.min_step_interval_seconds + 1)   # 步进间隔（R1-F3）
     esc = led.escalate("wo-800", BLOCKER, time_budget_seconds=60)
     assert (esc.from_level, esc.to_level) == (LEVEL_L4, LEVEL_L5)
     with pytest.raises(EscalationStateError):            # L5 = 终点
@@ -310,15 +327,18 @@ def test_downgrade_invalidates_readiness_package(clock):
     """回退后现场已变：就绪包作废，重升 L5 必须重 render（fail-closed）。
     （重升在去重窗口外进行——窗口是另一道独立的闸，见签名去重用例。）"""
     led = EscalationLedger(now=clock)
-    _climb(led, "wo-810")
+    _climb(led, "wo-810", clock=clock)
     led.readiness(_ready_task("wo-810"))
+    clock.advance(led.guard.min_step_interval_seconds + 1)   # 步进间隔（R1-F3）
     led.escalate("wo-810", BLOCKER, time_budget_seconds=60)   # → L5
     led.downgrade("wo-810")                                   # L5→L4
     assert led.case_of("wo-810").ready_package is None
     clock.advance(led.guard.dedup_window_seconds + 1)         # 窗口外：只考察就绪包闸
     with pytest.raises(EscalationStateError):                 # 旧包已作废
+        clock.advance(led.guard.dedup_window_seconds + 1)     # 窗口外（去重闸不触发）
         led.escalate("wo-810", BLOCKER, time_budget_seconds=60)
     led.readiness(_ready_task("wo-810"))
+    clock.advance(led.guard.min_step_interval_seconds + 1)   # 步进间隔（R1-F3）
     led.escalate("wo-810", BLOCKER, time_budget_seconds=60)   # 重 render 后放行
     assert led.level_of("wo-810") == LEVEL_L5
 
@@ -342,3 +362,64 @@ def test_attempt_and_escalation_events_are_audited(clock):
     kinds = {e.event for e in led.audit}
     assert {"CASE_OPEN", "ATTEMPT", "ATTEMPT_REJECTED", "ESCALATE"} <= kinds
     assert all(e.task_ref == "wo-900" for e in led.audit)     # 事件全部挂工单
+
+
+# ── grok 红队 R1 复判回归（2026-09-28）────────────────────────────────────────
+
+def test_l5_gate_binds_readiness_package_to_current_blocker(clock):
+    """红队 R1-F1：L4→L5 闸必须绑定当前 blocker 签名——用 A 的就绪包给 B 开门被拒；
+    换回 A（包重 render 后）放行。"""
+    led = EscalationLedger(now=clock)
+    blocker_a, blocker_b = {"error": "A", "res": "r"}, {"error": "B", "res": "r"}
+    for _ in range(4):
+        for _ in range(led.guard.max_attempts_per_level):
+            led.attempt("wo-r1", blocker_a)
+        clock.advance(led.guard.min_step_interval_seconds + 1)
+        led.escalate("wo-r1", blocker_a, time_budget_seconds=60)
+    led.readiness(_ready_task("wo-r1"))                    # 包绑定 A 的签名
+    with pytest.raises(EscalationStateError):              # 拿 A 的包给 B 开门 → 拒
+        clock.advance(led.guard.min_step_interval_seconds + 1)   # 步进间隔外（R1-F3）
+        led.escalate("wo-r1", blocker_b, time_budget_seconds=60)
+    assert led.level_of("wo-r1") == LEVEL_L4               # 拒绝路径零副作用
+    for _ in range(led.guard.max_attempts_per_level):      # B 在各级没有无解证明
+        led.attempt("wo-r1", blocker_b)
+    clock.advance(led.guard.min_step_interval_seconds + 1)
+    led.readiness(_ready_task("wo-r1"))                    # 仍绑定 A（case 最近签名）
+    esc = led.escalate("wo-r1", blocker_a, time_budget_seconds=60)   # A 本人升级 → 放行
+    assert esc.to_level == LEVEL_L5
+
+
+def test_per_level_total_cap_bounds_signature_shopping(clock):
+    """红队 R1-F2：换 blocker 字段刷新签名无法重置级内限次——总量上限（默认 3×3）
+    到顶后，任何新签名的原地尝试同样被拒。"""
+    led = EscalationLedger(now=clock)
+    for i in range(led.guard.max_total_attempts_per_level):   # 9 次尝试、9 个不同签名
+        led.attempt("wo-r2", {"error": "varies", "nonce": i})
+    with pytest.raises(EscalationRequiredError):              # 第 10 个签名也被总量上限拦下
+        led.attempt("wo-r2", {"error": "brand-new"})
+    assert led.case_of("wo-r2").level_totals["L0"] == led.guard.max_total_attempts_per_level
+
+
+def test_min_step_interval_blocks_rapid_climb(clock):
+    """红队 R1-F3：去重窗口内秒级连跳（L0→L4 各源层级不同、去重键拦不住）被
+    最小步进间隔拦下；间隔外恢复逐级爬升。"""
+    led = EscalationLedger(now=clock)
+    for _ in range(led.guard.max_attempts_per_level):
+        led.attempt("wo-r3", BLOCKER)
+    led.escalate("wo-r3", BLOCKER, time_budget_seconds=60)    # L0→L1
+    for _ in range(led.guard.max_attempts_per_level):
+        led.attempt("wo-r3", BLOCKER)
+    with pytest.raises(EscalationStormError):                 # 0s 后连跳 → 拒
+        led.escalate("wo-r3", BLOCKER, time_budget_seconds=60)
+    assert led.level_of("wo-r3") == "L1"
+    clock.advance(led.guard.min_step_interval_seconds + 1)
+    led.escalate("wo-r3", BLOCKER, time_budget_seconds=60)    # 间隔外 → 放行
+    assert led.level_of("wo-r3") == "L2"
+
+
+def test_storm_guard_additional_parameters_validated():
+    """红队补充参数的配置纪律：总量上限 ≥ 级内限次；步进间隔非负。"""
+    with pytest.raises(EscalationSchemaError):
+        StormGuard(max_total_attempts_per_level=2)            # < max_attempts_per_level=3
+    g = StormGuard(min_step_interval_seconds=0)               # 0 = 关闭步进间隔（合法）
+    assert g.min_step_interval_seconds == 0
