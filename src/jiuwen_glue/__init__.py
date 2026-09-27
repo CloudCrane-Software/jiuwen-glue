@@ -16,6 +16,7 @@
 - 消融验证（WO-0007 件 1：准入前 A/B 对照，原生没有对照实验）            → :mod:`jiuwen_glue.ablation`
 - 准入记录（WO-0007 件 2：消融+GuardrailRun 硬规则，绑定 Spec 版本）     → :mod:`jiuwen_glue.admission`
 - usage_events 计量四维度 + 租约-Higress consumer 绑定（断流求值）       → :mod:`jiuwen_glue.usage`
+- 计费 P0：internal 按 project 归集 + 影子成本周报 + 费率卡确定性结算骨架 → :mod:`jiuwen_glue.billing`
 
 边界（写死）: 原生层管"怎么做"，glue 管"准不准进"，控制台管"看得见"；
 发现与编排一律用原生 Symphony，本包不自建发现机制；
@@ -85,6 +86,9 @@ from .decisions import DecisionLog, DecisionRecord, context_hash
 from .errors import (
     AdmissionDeniedError,
     ArtifactRouteUndeclaredError,
+    BillingError,
+    BillingSchemaError,
+    BillingSettleError,
     BudgetExceededError,
     CapacitySchemaError,
     ChallengeStateError,
@@ -156,6 +160,29 @@ from .identity import (
     narrow_delegation,
 )
 from .leases import ACTIVE, EXHAUSTED, EXPIRED, REVOKED, BudgetLedger, BudgetLease
+from .billing import (
+    RATE_CARD_SCHEMA,
+    SETTLE_ENGINE,
+    UNATTRIBUTED_LABEL,
+    BillLine,
+    ProjectUsage,
+    UsageAggRow,
+    UsageEventRow,
+    RateCard,
+    RateCardLine,
+    SettlementResult,
+    ShadowPrice,
+    ShadowPriceTable,
+    aggregate_by_project,
+    bill_markdown,
+    deterministic_settle,
+    parse_rate_card,
+    rate_card_snapshot_hash,
+    select_rate_card,
+    settlement_to_json,
+    verify_rate_card,
+    weekly_report,
+)
 from .promotion import (
     GATE_BLOCKED,
     GATE_PASS,
@@ -198,6 +225,11 @@ from .usage import (
     REASON_LEASE_EXPIRED,
     REASON_LEASE_LAPSED,
     REASON_LEASE_REVOKED,
+    SETTLEMENT_CLASSES,
+    SETTLEMENT_CUSTOMER,
+    SETTLEMENT_FREE,
+    SETTLEMENT_INTERNAL,
+    SETTLEMENT_TRIAL,
     USAGE_KINDS,
     BindingLedger,
     CutoffAction,
