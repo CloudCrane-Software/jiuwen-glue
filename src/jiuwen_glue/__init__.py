@@ -15,6 +15,7 @@
 - 决策层 MVP（JevProvider 三原语：classify/score/judge + 决策留痕）      → :mod:`jiuwen_glue.decision`
 - 消融验证（WO-0007 件 1：准入前 A/B 对照，原生没有对照实验）            → :mod:`jiuwen_glue.ablation`
 - 准入记录（WO-0007 件 2：消融+GuardrailRun 硬规则，绑定 Spec 版本）     → :mod:`jiuwen_glue.admission`
+- usage_events 计量四维度 + 租约-Higress consumer 绑定（断流求值）       → :mod:`jiuwen_glue.usage`
 
 边界（写死）: 原生层管"怎么做"，glue 管"准不准进"，控制台管"看得见"；
 发现与编排一律用原生 Symphony，本包不自建发现机制；
@@ -111,6 +112,9 @@ from .errors import (
     UnknownDecisionError,
     UnknownGuardrailRunError,
     UnknownPromotionAssetError,
+    UsageError,
+    UsageSchemaError,
+    UsageStateError,
 )
 from .evidence import DRAFT, FINALIZED, VERIFIED, Evidence, EvidenceStore, EvidenceTransition
 from .guardrail import (
@@ -179,6 +183,31 @@ from .routes import (
     ArtifactRouteTable,
     NodeCapacity,
 )
+from .usage import (
+    BINDING_ACTIVE,
+    BINDING_CUTOFF,
+    BINDING_REVOKED,
+    BINDING_STATES,
+    CUTOFF_DRY_RUN,
+    CUTOFF_ENFORCE,
+    CUTOFF_MODES,
+    KIND_COMPUTE_SECONDS,
+    KIND_LLM_RELAY,
+    KIND_SANDBOX_SECONDS,
+    KIND_STORAGE_BYTES,
+    REASON_LEASE_EXPIRED,
+    REASON_LEASE_LAPSED,
+    REASON_LEASE_REVOKED,
+    USAGE_KINDS,
+    BindingLedger,
+    CutoffAction,
+    LeaseConsumerBinding,
+    UsageEvent,
+    UsageLedger,
+    UsageSummary,
+    cutoff_due,
+    cutoff_plan,
+)
 from .rules import (
     BLOCKED,
     CANCELLED,
@@ -189,6 +218,23 @@ from .rules import (
     SubtaskSpec,
     Task,
     TaskLedger,
+)
+from .selection import (
+    MAX_CANDIDATES,
+    SCOPE as SELECTION_SCOPE,
+    SIGNALS as SELECTION_SIGNALS,
+    SIGNAL_WEIGHTS,
+    SIGNAL_BUDGET,
+    SIGNAL_CONCISENESS,
+    SIGNAL_DIFF_CONSENSUS,
+    SIGNAL_EVAL,
+    SIGNAL_MUTATION,
+    Candidate as SelectionCandidate,
+    SelectionError,
+    SelectionRejectedError,
+    SelectionResult,
+    score as selection_score,
+    select as select_winner,
 )
 
 __version__ = "0.2.0"
@@ -209,6 +255,7 @@ __all__ = [
     "DecisionSchemaError", "UnknownDecisionError",
     "ArtifactRouteUndeclaredError", "RouteSchemaError", "CapacitySchemaError",
     "DecisionLayerError", "JevBackendError", "AblationError", "AdmissionError",
+    "UsageError", "UsageSchemaError", "UsageStateError",
     # leases
     "BudgetLedger", "BudgetLease",
     "ACTIVE", "EXHAUSTED", "EXPIRED", "REVOKED",
@@ -260,5 +307,20 @@ __all__ = [
     "SINK_GIT", "SINK_MINIO", "SINK_EVAL_ASSETS",
     "KIND_CODE", "KIND_VIDEO", "KIND_EVAL", "PIPELINE_DEFAULT",
     "TRUST_TRUSTED", "TRUST_UNTRUSTED",
+    # usage（计量四维度 + 租约-consumer 绑定，v2.0 §4.4 / W-04）
+    "UsageEvent", "UsageLedger", "UsageSummary",
+    "KIND_LLM_RELAY", "KIND_COMPUTE_SECONDS", "KIND_STORAGE_BYTES", "KIND_SANDBOX_SECONDS",
+    "USAGE_KINDS",
+    "LeaseConsumerBinding", "BindingLedger",
+    "BINDING_ACTIVE", "BINDING_CUTOFF", "BINDING_REVOKED", "BINDING_STATES",
+    "CUTOFF_DRY_RUN", "CUTOFF_ENFORCE", "CUTOFF_MODES",
+    "REASON_LEASE_EXPIRED", "REASON_LEASE_REVOKED", "REASON_LEASE_LAPSED",
+    "CutoffAction", "cutoff_due", "cutoff_plan",
+    # selection（line 圈择优：§5.4 纯机器信号公式 + winner_ref，W-05 骨架）
+    "SELECTION_SCOPE", "SELECTION_SIGNALS", "SIGNAL_WEIGHTS",
+    "SIGNAL_EVAL", "SIGNAL_MUTATION", "SIGNAL_CONCISENESS",
+    "SIGNAL_DIFF_CONSENSUS", "SIGNAL_BUDGET", "MAX_CANDIDATES",
+    "SelectionCandidate", "SelectionResult", "SelectionError", "SelectionRejectedError",
+    "selection_score", "select_winner",
     "__version__",
 ]

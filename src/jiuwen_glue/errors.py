@@ -207,3 +207,15 @@ class RouteSchemaError(RouteError):
 
 class CapacitySchemaError(GlueError):
     """节点容量声明不合法（份额越界 / max_parallel < 1 / 信任等级枚举外）。"""
+
+
+class UsageError(GlueError):
+    """usage_events 计量（append-only）与租约-consumer 绑定的基类错误（v2.0 §4.4）。"""
+
+
+class UsageSchemaError(UsageError):
+    """计量事件/绑定声明字段不合法（维度枚举外 / 负数量 / llm_relay 缺 consumer key）。"""
+
+
+class UsageStateError(UsageError):
+    """绑定状态非法转移（终态再转移 / 未知 binding）。"""
