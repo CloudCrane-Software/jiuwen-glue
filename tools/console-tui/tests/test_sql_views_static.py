@@ -31,6 +31,15 @@ VIEWS_FROM_OPS_004 = {
     "glue.v_usage": ["kind", "events", "total_quantity", "first_at", "last_at"],
 }
 
+# W-06 裁决卡：glue.v_readiness_card 的 DDL 随 glue.escalation 模块落库
+# （[待 DDL]）——先按消费契约对账 SELECT 列（与 ReadinessCardRow 字段同构）。
+VIEWS_PENDING_DDL_W06 = {
+    "glue.v_readiness_card": ["card_id", "task_ref", "task_title", "signature",
+                              "category", "pieces", "missing", "ready",
+                              "knock_back_to_l3", "level", "decision_refs",
+                              "generated_at", "state"],
+}
+
 
 def _code_lines(text: str) -> str:
     """去掉注释行后再做破坏性语句检查（注释里的词不算）。"""
@@ -65,11 +74,12 @@ def test_views_are_read_only_pg_dialect():
 
 def test_data_pg_queries_align_with_views():
     """data.py 的取数 SQL 引用的视图：003 五视图在本仓对账；
-    glue.v_usage 属跨仓 004（CNB company-ops），按消费契约对账 SELECT 列。"""
+    glue.v_usage 属跨仓 004（CNB company-ops），按消费契约对账 SELECT 列；
+    glue.v_readiness_card 属 W-06 [待 DDL]，同按消费契约对账。"""
     data = DATA_PATH.read_text(encoding="utf-8")
     sql_text = SQL_PATH.read_text(encoding="utf-8")
     used_views = set(re.findall(r"FROM (glue\.v_\w+)", data))
-    assert used_views == set(VIEWS) | set(VIEWS_FROM_OPS_004), \
+    assert used_views == set(VIEWS) | set(VIEWS_FROM_OPS_004) | set(VIEWS_PENDING_DDL_W06), \
         f"取数视图与视图清单不对齐: {used_views}"
     for view in used_views & set(VIEWS):
         assert f"CREATE OR REPLACE VIEW {view}" in sql_text
@@ -77,10 +87,14 @@ def test_data_pg_queries_align_with_views():
     assert usage_select is not None, "缺 _Q_USAGE 取数"
     for field in VIEWS_FROM_OPS_004["glue.v_usage"]:
         assert field in usage_select.group(1), f"v_usage 取数缺列 {field!r}"
-    # pg 写路径只允许出现这两张基础表（干预写死的范围：decision_record / challenge）
+    cards_sql = data[data.index("_Q_CARDS = ("):data.index("_Q_CARD_SELECT")]
+    for field in VIEWS_PENDING_DDL_W06["glue.v_readiness_card"]:
+        assert field in cards_sql, f"v_readiness_card 取数缺列 {field!r}"
+    # pg 写路径只允许出现这几张基础表（干预写死的范围：decision_record /
+    # challenge / readiness_card[W-06，表 DDL 同上待落]）
     written_tables = set(re.findall(r"INTO (glue\.\w+)|UPDATE (glue\.\w+)", data))
     flat = {a or b for a, b in written_tables}
-    assert flat <= {"glue.decision_record", "glue.challenge"}, \
+    assert flat <= {"glue.decision_record", "glue.challenge", "glue.readiness_card"}, \
         f"干预写路径越界: {flat}"
 
 

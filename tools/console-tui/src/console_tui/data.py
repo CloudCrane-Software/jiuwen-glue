@@ -12,6 +12,11 @@
    v2.0 §4.4 四维度聚合）
    塔列（agent/团队）无独立表——两种模式都从工单数据推导（derive_agents）。
 
+裁决卡队列（W-06，v2.1 §4.7 升级体系）——渲染与两键裁决在 adjudication 模块：
+- 读：pg glue.v_readiness_card（[待 DDL]，SQL 接口先留） / mock: 种子卡；
+- 写：approve（递呈人类，包必须 READY——fail-closed）/ escalate（打回 L3），
+  走 state.resolve_adjudication_state 状态机 + append-only 决策记录留痕。
+
 干预写路径（s/a/p 三级，全部留痕）:
 - s steer   → mock: 内存决策+审计表；pg: INSERT glue.decision_record（type=steer
   记在 meta.intervention / chosen="steer"，append-only 表无 update 路径）；
@@ -34,10 +39,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .state import (CH_PENDING, KIND_APPROVE, KIND_DENY, KIND_PAUSE, KIND_RESUME,
-                    KIND_STEER, OPERATOR, GovernanceError,
-                    ChallengeResolutionError, UnknownTargetError,
-                    apply_pause, audit_event, canonical_hash,
+from .state import (CARD_PENDING, CH_PENDING, KIND_APPROVE, KIND_DENY, KIND_ESCALATE_BACK,
+                    KIND_PAUSE, KIND_RESUME, KIND_STEER, OPERATOR, GovernanceError,
+                    AdjudicationResolutionError, ChallengeResolutionError, UnknownTargetError,
+                    apply_pause, audit_event, canonical_hash, resolve_adjudication_state,
                     resolve_challenge_state, utcnow)
 
 DSN_ENV = "CONSOLE_TUI_DSN"
@@ -127,6 +132,33 @@ class UsageRow:
     total_quantity: float
     first_at: Optional[float]
     last_at: Optional[float]
+
+
+@dataclass(frozen=True)
+class ReadinessCardRow:
+    """人类就绪包裁决卡行模型（W-06，v2.1 §4.7；pg 读 glue.v_readiness_card，[待 DDL]）。
+
+    pieces = 四件套 (key, verdict, detail) 三元组序列（与 glue ReadinessPiece 同构，
+    字符串形态跨层传递——本包不 import jiuwen_glue，语义由 tests 交叉校验防漂移）。
+    """
+
+    card_id: str
+    task_ref: str
+    task_title: str
+    signature: str                     # 阻塞签名（glue escalation.signature_for，64 hex）
+    category: str                      # 四类硬清单之一；""=未归类（打回 L3）
+    pieces: Tuple[Tuple[str, str, str], ...]   # (piece_key, verdict, detail)
+    missing: Tuple[str, ...]           # 非 PASS 的件
+    ready: bool                        # 四件套聚合 = PASS（fail-closed 批准闸）
+    knock_back_to_l3: bool             # 范畴不在四类硬清单
+    level: str                         # 递包时的阶梯层（正常为 L4）
+    decision_refs: Tuple[str, ...]     # 挂联决策记录引用（人类复核入口）
+    generated_at: float
+    state: str = CARD_PENDING
+
+
+HARD_LIST_CATEGORIES = ("money", "legal_tos", "irreversible", "theory_approval")
+"""人类专属四类硬清单（与 jiuwen_glue.escalation.HARD_LIST 同源；tests 交叉校验防漂移）。"""
 
 
 USAGE_KIND_LABELS = {
@@ -253,6 +285,7 @@ def _decision_row_for(kind: str, *, target: str, by: str, text: str = "",
         decision_id=did, ts=ts, agent_ref=by, context_hash=canonical_hash(ctx),
         options=(KIND_STEER, "noop") if kind == KIND_STEER else
                 (KIND_APPROVE, KIND_DENY) if kind in (KIND_APPROVE, KIND_DENY) else
+                (KIND_APPROVE, KIND_ESCALATE_BACK) if kind == KIND_ESCALATE_BACK else
                 (KIND_PAUSE, KIND_RESUME),
         chosen=kind, rationale_ref=f"console://audit/{kind}/{int(ts * 1000)}",
         guardrail_run_ref="", meta=meta)
@@ -275,6 +308,7 @@ class ConsoleStore:
     def decisions(self, limit: int = 20) -> List[DecisionRow]: raise NotImplementedError
     def nodes(self) -> List[NodeRow]: raise NotImplementedError
     def usage(self) -> List[UsageRow]: raise NotImplementedError
+    def adjudication_cards(self) -> List[ReadinessCardRow]: raise NotImplementedError
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self.tasks(), utcnow())
     def pool_summary(self) -> PoolSummary:
@@ -293,12 +327,41 @@ class ConsoleStore:
     def set_task_pause(self, task_id: str, pause: bool, by: str = OPERATOR) -> AuditEntry:
         raise NotImplementedError
 
+    # ── 裁决卡两键（W-06，v2.1 §4.7；approve=递呈人类 / escalate=打回 L3）────
+    def resolve_adjudication(self, card_id: str, approved: bool,
+                             by: str = OPERATOR) -> AuditEntry:
+        raise NotImplementedError
+
 
 # ── MOCK 后端 ────────────────────────────────────────────────────────────────
 
+def _readiness_card(card_id: str, task_ref: str, title: str, category: str, *,
+                    ready: bool, now: float) -> ReadinessCardRow:
+    """确定性裁决卡种子（演示/测试共用）：ready 卡四件套全 PASS，否则按缺料给 BLOCKED。"""
+    pieces = [
+        ("facts_fixed", "PASS" if ready else "BLOCKED",
+         "3 facts pinned with evidence refs" if ready else "no facts assembled"),
+        ("category_clear", "PASS" if category in HARD_LIST_CATEGORIES else "BLOCKED",
+         f"hard-list category: {category}" if category in HARD_LIST_CATEGORIES
+         else f"no hard-list category declared (not in {HARD_LIST_CATEGORIES})"),
+        ("in_permission_no_solution", "PASS",
+         "levels L0..L3 each hit the per-level attempt cap for this signature"),
+        ("reversibility", "PASS" if ready else "BLOCKED",
+         "reversible=False; rollback=n/a" if ready else "no reversibility assessment"),
+    ]
+    missing = tuple(k for k, v, _ in pieces if v != "PASS")
+    return ReadinessCardRow(
+        card_id=card_id, task_ref=task_ref, task_title=title,
+        signature=canonical_hash({"task": task_ref}), category=category,
+        pieces=tuple(pieces), missing=missing, ready=(not missing),
+        knock_back_to_l3=(category not in HARD_LIST_CATEGORIES),
+        level="L4", decision_refs=("dec-3001",), generated_at=now - 8 * 60.0)
+
+
 def default_mock_seed(now: float) -> Tuple[List[TaskRow], List[LeaseRow],
                                            List[ChallengeRow], List[DecisionRow],
-                                           List[NodeRow], List[UsageRow]]:
+                                           List[NodeRow], List[UsageRow],
+                                           List[ReadinessCardRow]]:
     """确定性种子数据（演示/测试共用；now 可注入以便过期场景可控）。"""
     m = 60.0
     tasks = [
@@ -348,7 +411,15 @@ def default_mock_seed(now: float) -> Tuple[List[TaskRow], List[LeaseRow],
         UsageRow("storage_bytes", 15, 3_355_443_200.0, now - 300 * m, now - 30 * m),
         UsageRow("sandbox_seconds", 11, 1_860.0, now - 120 * m, now - 1 * m),
     ]
-    return tasks, leases, challenges, decisions, nodes, usage
+    # 裁决卡（W-06）：一张 READY（irreversible，可批准递呈人类）、
+    # 一张 BLOCKED（未归类，只能打回 L3——approve 键会被 fail-closed 拒绝）
+    cards = [
+        _readiness_card("card-4001", "tsk-003", "修 guardrail fail-closed 缺陷",
+                        "irreversible", ready=True, now=now),
+        _readiness_card("card-4002", "tsk-004", "出卷器 v3 回归",
+                        "", ready=False, now=now),
+    ]
+    return tasks, leases, challenges, decisions, nodes, usage, cards
 
 
 class MockConsoleStore(ConsoleStore):
@@ -362,11 +433,12 @@ class MockConsoleStore(ConsoleStore):
         now = self._now()
         if seed:
             (self._tasks, self._leases, self._challenges,
-             self._decisions, self._nodes, self._usage) = default_mock_seed(now)
+             self._decisions, self._nodes, self._usage, self._cards) = default_mock_seed(now)
         else:
             self._tasks, self._leases, self._challenges, self._decisions, \
-                self._nodes, self._usage = [], [], [], [], [], []
+                self._nodes, self._usage, self._cards = [], [], [], [], [], [], []
         self._challenge_by_id: Dict[str, ChallengeRow] = {c.challenge_id: c for c in self._challenges}
+        self._card_by_id: Dict[str, ReadinessCardRow] = {c.card_id: c for c in self._cards}
         self._audit: List[AuditEntry] = []
 
     # ── 面板取数 ──────────────────────────────────────────────────────────
@@ -400,6 +472,11 @@ class MockConsoleStore(ConsoleStore):
     def usage(self) -> List[UsageRow]:
         """计量面板（W-04）：四维度聚合行，按 kind 确定性排序。"""
         return sorted(self._usage, key=lambda u: u.kind)
+
+    def adjudication_cards(self) -> List[ReadinessCardRow]:
+        """裁决卡队列（W-06）：pending 卡按 generated_at 先到先裁。"""
+        return sorted((c for c in self._card_by_id.values() if c.state == CARD_PENDING),
+                      key=lambda c: c.generated_at)
 
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self._tasks, self._now())
@@ -461,6 +538,29 @@ class MockConsoleStore(ConsoleStore):
                                       event["by"], event["detail"]))
         return AuditEntry(event["ts"], event["kind"], event["target"], event["by"], event["detail"])
 
+    # ── 裁决卡两键（W-06，v2.1 §4.7；状态机先行校验，不绕过）──────────────
+    def resolve_adjudication(self, card_id: str, approved: bool,
+                             by: str = OPERATOR) -> AuditEntry:
+        """裁决就绪包卡：approve=批准递呈人类（包必须 READY，fail-closed）；
+        escalate=打回 L3。走 state.resolve_adjudication_state 纯状态机。"""
+        card = self._card_by_id.get(card_id)
+        if card is None:
+            raise UnknownTargetError(f"unknown readiness card: {card_id!r}")
+        kind = KIND_APPROVE if approved else KIND_ESCALATE_BACK
+        new_state, resolved_by = resolve_adjudication_state(
+            card.state, ready=card.ready, approved=approved, by=by)
+        resolved = ReadinessCardRow(**{**card.__dict__, "state": new_state})
+        self._card_by_id[card_id] = resolved
+        row, event = _decision_row_for(kind, target=card_id, by=resolved_by,
+                                       detail={"task_ref": card.task_ref,
+                                               "card_state": new_state,
+                                               "ready": card.ready},
+                                       ts=self._now())
+        self._decisions.append(row)
+        self._audit.append(AuditEntry(event["ts"], event["kind"], event["target"],
+                                      event["by"], event["detail"]))
+        return AuditEntry(event["ts"], event["kind"], event["target"], event["by"], event["detail"])
+
 
 # ── PG 后端（只读视图 + 受控干预写路径；SQL 全参数化）────────────────────────
 
@@ -494,6 +594,18 @@ class PgConsoleStore(ConsoleStore):
                 " FROM glue.v_usage WHERE tenant_id = %s ORDER BY kind")
     _Q_TASK_PAUSED = ("SELECT paused FROM glue.v_task_board WHERE tenant_id = %s"
                       " AND task_id = %s")
+    # 裁决卡（W-06，v2.1 §4.7）——SQL 接口先留：视图 glue.v_readiness_card 与表
+    # glue.readiness_card 的 DDL 随 escalation 模块落库（[待 DDL]，见模块头注释）。
+    # 口径与 mock 同构：pieces/missing 为 jsonb，ready 为布尔聚合，state 守卫在
+    # UPDATE 的 WHERE 里（第二道闸），四件套 fail-closed 校验在状态机（第一道）。
+    _Q_CARDS = ("SELECT card_id, task_ref, task_title, signature, category, pieces,"
+                " missing, ready, knock_back_to_l3, level, decision_refs, generated_at,"
+                " state FROM glue.v_readiness_card WHERE tenant_id = %s AND state = 'pending'"
+                " ORDER BY generated_at")
+    _Q_CARD_SELECT = ("SELECT state, ready FROM glue.readiness_card"
+                      " WHERE card_id = %s")
+    _Q_CARD_RESOLVE = ("UPDATE glue.readiness_card SET state = %s, resolved_at = now(),"
+                       " resolved_by = %s WHERE card_id = %s AND state = 'pending'")
 
     # 干预写路径（s/a/p；append-only + 状态机守卫；DDL 触发器是第二道闸）
     _Q_STEER = ("INSERT INTO glue.decision_record (decision_id, agent_ref, context_hash,"
@@ -582,6 +694,21 @@ class PgConsoleStore(ConsoleStore):
                          self._ts(r[4]) if r[4] is not None else None)
                 for r in rows]
 
+    def adjudication_cards(self) -> List[ReadinessCardRow]:
+        """裁决卡队列（W-06）：glue.v_readiness_card（[待 DDL]，SQL 接口先留）。"""
+        rows = self._exec(self._Q_CARDS, [self._tenant], fetch="all")
+        out = []
+        for r in rows:
+            pieces = r[5] if isinstance(r[5], (list, tuple)) else json.loads(r[5] or "[]")
+            missing = r[6] if isinstance(r[6], (list, tuple)) else json.loads(r[6] or "[]")
+            refs = r[10] if isinstance(r[10], (list, tuple)) else json.loads(r[10] or "[]")
+            out.append(ReadinessCardRow(
+                str(r[0]), r[1], r[2], r[3] or "", r[4] or "",
+                tuple(tuple(p) for p in pieces), tuple(missing), bool(r[7]),
+                bool(r[8]), r[9] or "L4", tuple(refs), self._ts(r[11]),
+                r[12] if r[12] in (CARD_PENDING, "approved", "returned_l3") else CARD_PENDING))
+        return out
+
     def audit_trail(self, limit: int = 50) -> List[AuditEntry]:
         rows = self._exec(self._Q_AUDIT, [self._tenant, int(limit)], fetch="all")
         return [AuditEntry(self._ts(r[0]), r[1], r[2].get("target", ""), r[2].get("by", ""),
@@ -633,6 +760,30 @@ class PgConsoleStore(ConsoleStore):
         kind = apply_pause(bool(rows[0][0]), KIND_PAUSE if pause else KIND_RESUME)
         row, event = _decision_row_for(kind, target=task_id, by=by, ts=utcnow())
         self._exec(self._Q_PAUSE, [uuid.UUID(row.decision_id), row.agent_ref,
+                                   row.context_hash, json.dumps(list(row.options)),
+                                   row.chosen, row.rationale_ref,
+                                   json.dumps(row.meta, ensure_ascii=False), self._tenant])
+        return AuditEntry(event["ts"], event["kind"], event["target"], event["by"], event["detail"])
+
+    # ── 裁决卡两键（W-06；状态机先行校验，SQL 带守卫，DDL 触发器兜底 [待 DDL]）──
+    def resolve_adjudication(self, card_id: str, approved: bool,
+                             by: str = OPERATOR) -> AuditEntry:
+        rows = self._exec(self._Q_CARD_SELECT, [uuid.UUID(card_id)], fetch="all")
+        if not rows:
+            raise UnknownTargetError(f"unknown readiness card: {card_id!r}")
+        state, ready = rows[0][0], bool(rows[0][1])
+        kind = KIND_APPROVE if approved else KIND_ESCALATE_BACK
+        new_state, resolved_by = resolve_adjudication_state(
+            state, ready=ready, approved=approved, by=by)
+        cur = self._exec(self._Q_CARD_RESOLVE, [new_state, resolved_by,
+                                                uuid.UUID(card_id)], fetch="rowcount")
+        if cur != 1:
+            raise AdjudicationResolutionError(
+                f"readiness card {card_id} raced to a non-resolvable state (fail-closed)")
+        row, event = _decision_row_for(kind, target=card_id, by=resolved_by,
+                                       detail={"card_state": new_state, "ready": ready},
+                                       ts=utcnow())
+        self._exec(self._Q_STEER, [uuid.UUID(row.decision_id), row.agent_ref,
                                    row.context_hash, json.dumps(list(row.options)),
                                    row.chosen, row.rationale_ref,
                                    json.dumps(row.meta, ensure_ascii=False), self._tenant])
