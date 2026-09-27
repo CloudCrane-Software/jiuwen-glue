@@ -10,6 +10,10 @@
 5. 节点利用率  → pg: glue.v_node_utilization           / mock: 种子数据
 6. 计量 usage  → pg: glue.v_usage（004_usage_events）   / mock: 种子数据（W-04，
    v2.0 §4.4 四维度聚合）
+7. 意图时间线  → pg: glue.v_signal_timeline（007_signal_inbox，W-11 v2.1 §10）
+   / mock: 种子数据——signal_inbox 状态机投影（received→…→completed 与
+   rejected/suppressed/void 侧出口）。Temporal 只持编排状态（workflow_id 互引），
+   业务事实在此面板可见：裁决与编排分离的展示面。
    塔列（agent/团队）无独立表——两种模式都从工单数据推导（derive_agents）。
 
 裁决卡队列（W-06，v2.1 §4.7 升级体系）——渲染与两键裁决在 adjudication 模块：
@@ -169,6 +173,50 @@ USAGE_KIND_LABELS = {
 }
 
 
+# ── 意图时间线（W-11，v2.1 §10；signal_inbox 状态机投影）─────────────────────
+
+SIGNAL_STATUS_ORDER = {
+    # 主链（深度=时间线推进度）；侧出口单列（rejected/suppressed/void）
+    "received": 0, "triaged": 1, "routed": 2, "drafted": 3, "gated": 4,
+    "ticketed": 5, "tracking": 6, "completed": 7,
+    "rejected": -1, "suppressed": -1, "void": -1,
+}
+
+SIGNAL_STATUS_LABELS = {
+    "received": "已收件", "triaged": "已分诊", "routed": "已路由",
+    "drafted": "PROP 草稿", "gated": "已门控", "ticketed": "已开工单",
+    "tracking": "跟踪中", "completed": "已完成",
+    "rejected": "已拒绝", "suppressed": "已去重", "void": "已失效",
+}
+
+
+@dataclass(frozen=True)
+class SignalTimelineRow:
+    """意图时间线行（glue.v_signal_timeline 同构；007_signal_inbox 投影）。"""
+
+    signal_id: str
+    source: str
+    type: str
+    status: str
+    prop_ref: str
+    guardrail_run_ref: str
+    workflow_id: str
+    ticket_refs: Tuple[str, ...]
+    created_at: float
+    last_transition_at: float
+    transition_count: int
+    last_reason_code: str
+
+    @property
+    def status_label(self) -> str:
+        return SIGNAL_STATUS_LABELS.get(self.status, self.status)
+
+    @property
+    def depth(self) -> int:
+        """主链推进深度（侧出口=-1，显示时排后并标终态）。"""
+        return SIGNAL_STATUS_ORDER.get(self.status, -1)
+
+
 def format_quantity(kind: str, total: float) -> str:
     """计量总量的展示格式化（两模式共用同一条显示逻辑，无第二决策点）。"""
     if kind == "storage_bytes":
@@ -309,6 +357,9 @@ class ConsoleStore:
     def nodes(self) -> List[NodeRow]: raise NotImplementedError
     def usage(self) -> List[UsageRow]: raise NotImplementedError
     def adjudication_cards(self) -> List[ReadinessCardRow]: raise NotImplementedError
+    def timeline(self, limit: int = 50) -> List[SignalTimelineRow]:
+        """意图时间线（W-11）：signal_inbox 状态机投影，按收件时间倒序。"""
+        raise NotImplementedError
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self.tasks(), utcnow())
     def pool_summary(self) -> PoolSummary:
@@ -422,6 +473,31 @@ def default_mock_seed(now: float) -> Tuple[List[TaskRow], List[LeaseRow],
     return tasks, leases, challenges, decisions, nodes, usage, cards
 
 
+def default_signal_seed(now: float) -> List[SignalTimelineRow]:
+    """意图时间线确定性种子（W-11，v2.1 §10 演示；与 srv-1 jiuwen_team 的
+    smoke-w11 冒烟种子同构）：主链一条走全程，另覆盖在途与三个侧出口。"""
+    m = 60.0
+    return [
+        SignalTimelineRow(
+            "sig-7001", "cnb-issue", "issue.feedback", "completed",
+            "PROP-00xx-draft", "run://g11", "wf/issue.feedback/sig-7001",
+            ("task://t-11a", "task://t-11b"), now - 240 * m, now - 30 * m, 7, ""),
+        SignalTimelineRow(
+            "sig-7002", "tech-reality", "tech.reality-change", "tracking",
+            "PROP-00yy-draft", "run://g12", "wf/tech.reality-change/sig-7002",
+            ("task://t-12a",), now - 120 * m, now - 8 * m, 6, ""),
+        SignalTimelineRow(
+            "sig-7003", "pipeline", "pipeline.feedback", "received",
+            "", "", "", (), now - 12 * m, now - 12 * m, 0, ""),
+        SignalTimelineRow(
+            "sig-7004", "monitoring", "monitoring.insight", "rejected",
+            "", "", "", (), now - 90 * m, now - 60 * m, 2, "NO_CONSUMER"),
+        SignalTimelineRow(
+            "sig-7005", "cnb-issue", "issue.feedback", "suppressed",
+            "", "", "", (), now - 45 * m, now - 44 * m, 1, "DUPLICATE"),
+    ]
+
+
 class MockConsoleStore(ConsoleStore):
     """内存后端：无 psycopg/textual 依赖即可全功能演示；干预落内存审计表。"""
 
@@ -434,9 +510,11 @@ class MockConsoleStore(ConsoleStore):
         if seed:
             (self._tasks, self._leases, self._challenges,
              self._decisions, self._nodes, self._usage, self._cards) = default_mock_seed(now)
+            self._signals: List[SignalTimelineRow] = default_signal_seed(now)
         else:
             self._tasks, self._leases, self._challenges, self._decisions, \
                 self._nodes, self._usage, self._cards = [], [], [], [], [], [], []
+            self._signals = []
         self._challenge_by_id: Dict[str, ChallengeRow] = {c.challenge_id: c for c in self._challenges}
         self._card_by_id: Dict[str, ReadinessCardRow] = {c.card_id: c for c in self._cards}
         self._audit: List[AuditEntry] = []
@@ -477,6 +555,11 @@ class MockConsoleStore(ConsoleStore):
         """裁决卡队列（W-06）：pending 卡按 generated_at 先到先裁。"""
         return sorted((c for c in self._card_by_id.values() if c.state == CARD_PENDING),
                       key=lambda c: c.generated_at)
+
+    def timeline(self, limit: int = 50) -> List[SignalTimelineRow]:
+        """意图时间线（W-11）：状态机投影按收件时间倒序（最新意图在上）。"""
+        rows = sorted(self._signals, key=lambda s: s.created_at, reverse=True)
+        return rows[:max(0, int(limit))]
 
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self._tasks, self._now())
@@ -592,6 +675,13 @@ class PgConsoleStore(ConsoleStore):
                 " ORDER BY node_id")
     _Q_USAGE = ("SELECT kind, events, total_quantity, first_at, last_at"
                 " FROM glue.v_usage WHERE tenant_id = %s ORDER BY kind")
+    # 意图时间线（W-11，v2.1 §10）：007_signal_inbox 的状态机投影（视图已落库
+    # srv-1 jiuwen_team；DDL 在 company-ops ops/sql/007_signal_inbox.sql）。
+    _Q_TIMELINE = ("SELECT signal_id, source, type, status, prop_ref,"
+                   " guardrail_run_ref, workflow_id, ticket_refs, created_at,"
+                   " last_transition_at, transition_count, last_reason_code"
+                   " FROM glue.v_signal_timeline WHERE tenant_id = %s"
+                   " ORDER BY created_at DESC LIMIT %s")
     _Q_TASK_PAUSED = ("SELECT paused FROM glue.v_task_board WHERE tenant_id = %s"
                       " AND task_id = %s")
     # 裁决卡（W-06，v2.1 §4.7）——SQL 接口先留：视图 glue.v_readiness_card 与表
@@ -707,6 +797,18 @@ class PgConsoleStore(ConsoleStore):
                 tuple(tuple(p) for p in pieces), tuple(missing), bool(r[7]),
                 bool(r[8]), r[9] or "L4", tuple(refs), self._ts(r[11]),
                 r[12] if r[12] in (CARD_PENDING, "approved", "returned_l3") else CARD_PENDING))
+        return out
+
+    def timeline(self, limit: int = 50) -> List[SignalTimelineRow]:
+        """意图时间线（W-11）：glue.v_signal_timeline 只读投影（%s 参数化）。"""
+        rows = self._exec(self._Q_TIMELINE, [self._tenant, int(limit)], fetch="all")
+        out = []
+        for r in rows:
+            tickets = r[7] if isinstance(r[7], (list, tuple)) else json.loads(r[7] or "[]")
+            out.append(SignalTimelineRow(
+                str(r[0]), r[1], r[2], r[3], r[4] or "", r[5] or "", r[6] or "",
+                tuple(str(t) for t in tickets), self._ts(r[8]), self._ts(r[9]),
+                int(r[10]), r[11] or ""))
         return out
 
     def audit_trail(self, limit: int = 50) -> List[AuditEntry]:

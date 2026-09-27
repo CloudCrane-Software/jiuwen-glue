@@ -33,11 +33,11 @@ async def pilot(store):
         yield p
 
 
-# ── 布局：塔式多列 + 状态栏 + 六面板 ─────────────────────────────────────────
+# ── 布局：塔式多列 + 状态栏 + 七面板 ─────────────────────────────────────────
 
-async def test_app_mounts_tower_status_bar_and_six_panels(pilot):
+async def test_app_mounts_tower_status_bar_and_seven_panels(pilot):
     app = pilot.app
-    assert len(app.query(DataTable)) == 6               # 六个数据面板（含 W-04 计量）
+    assert len(app.query(DataTable)) == 7               # 七个面板（W-04 计量 + W-11 意图时间线）
     cols = app.query(".agent-col")                      # 塔列 = 每列一 agent
     assert len(cols) == 4
     bar = static_text(app.query_one("#pool-bar"))

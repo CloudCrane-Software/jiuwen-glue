@@ -21,8 +21,9 @@ pg 模式：先由主 agent 把 `sql/003_console_views.sql` 落到 srv-1 glue �
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/console_tui/app.py` | Textual 塔式布局（状态栏 + 塔列 + 五面板）与 s/a/p 弹窗 |
+| `src/console_tui/app.py` | Textual 塔式布局（状态栏 + 塔列 + 面板组）与 s/a/p 弹窗 |
 | `src/console_tui/data.py` | 数据层：Mock / Pg 双实现（面板只读 + 干预写路径，SQL 全参数化） |
+| `src/console_tui/data.py`（W-11） | 意图时间线接口 `timeline()`：pg 读 `glue.v_signal_timeline`（company-ops ops/sql/007，已落库 srv-1 jiuwen_team）/ mock 种子演示——signal_inbox 状态机投影（v2.1 §10，Temporal 只持编排状态，业务事实在此可见） |
 | `src/console_tui/state.py` | 干预状态机（Challenge 裁决/暂停二态/canonical_hash，纯逻辑） |
 | `sql/003_console_views.sql` | 五个只读视图（PG 方言；消费方 data.py，落库由主 agent 执行） |
 | `docs/console-tui.md` | 面板/快捷键/Challenge 留痕语义/分层边界/已知边界 |
