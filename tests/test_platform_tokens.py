@@ -295,6 +295,32 @@ def test_hard_list_category_escalates_L4_never_mints(clock):
     assert len(escalates) == len(HARD_LIST_CATEGORIES)
 
 
+def test_hard_list_with_zero_ttl_still_escalates(clock):
+    """N5：repo_archive 目录项 max_ttl=0——硬清单 + ttl<=0 也必须先出升级对象。"""
+    m = make_minter(clock)
+    with pytest.raises(HardListEscalationError) as ei:
+        m.mint(make_request(clock, task_class="repo_archive", task_ref="wo-100",
+                            scopes=("github:repo:read",), ttl=0,
+                            hard_list=HARD_IRREVERSIBLE))
+    assert ei.value.signal["escalation_level"] == ESCALATION_L4
+    assert m.registered_count == 0
+    assert len([e for e in m.mint_log if e["event"] == "ESCALATE"]) == 1
+
+
+def test_flow_precheck_before_platform_exchange(clock):
+    """N6：守卫必须先于平台换票——硬清单请求不得触发任何 transport 调用。"""
+    transport = MockTransport(expires_at=clock() + 1800)
+    flow = GitHubAppInstallationFlow(
+        app_id="1", installation_id="2",
+        private_key_bao_ref="openbao:secret/credentials/github-apps/ci-bot",
+        signer=MockSigner(), transport=transport, now=clock)
+    with pytest.raises(HardListEscalationError):
+        flow.mint_installation_token(make_request(clock, task_class="repo_archive",
+                                                  hard_list=HARD_IRREVERSIBLE))
+    assert transport.calls == []                       # 平台零接触：换票未发生
+    assert len([e for e in flow.mint_log if e["event"] == "ESCALATE"]) == 1
+
+
 def test_hard_list_with_empty_scopes_still_escalates(clock):
     """H2b：硬清单 + 空 scope 必须先出升级对象（原先被空 scope 的
     TokenMintError 抢先，ESCALATE 零留痕）。"""

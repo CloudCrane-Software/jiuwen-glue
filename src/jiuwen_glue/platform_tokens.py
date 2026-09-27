@@ -270,28 +270,34 @@ class PlatformTokenMinter:
         self._mint_log.append(entry)
 
     # ── 铸造 ──
-    def mint(self, request: TokenRequest) -> MintedToken:
-        """每次铸造：校验 → 硬清单/扩权拒绝（升级对象留痕）→ 签名 → 登记。
+    def precheck(self, request: TokenRequest) -> None:
+        """铸造前全量校验（不含签名/登记，无副作用除升级留痕外）。
 
-        同参数重复调用**必然产出新 token**（禁缓存）：token_ref 取 uuid4，签名器
-        每次都重新调用，无任何返回旧结果的路径。
+        **升级守卫永远第一**（grok 复核 N5：TTL 校验先行会让硬清单请求在
+        ``ttl<=0`` 时零升级留痕被拒——repo_archive 目录项正是 max_ttl=0）。
+        供两跳流程（GitHubAppInstallationFlow.mint_installation_token）在调用
+        平台**之前**先行把关——grok 复核 N6：守卫若后于换票，拒绝路径上平台侧
+        token 已签发且无人回收。
+        如实边界：快照与 scope 都由调用方传入，调用方"自抄快照"等同伪造
+        decision_ref 输入——铸造器不做第二决策（PROP-0001），真实性由决策引用
+        链（OPA 决策记录，[待接线] 校验）保证。
         """
         # 1) 决策引用：每次铸造留痕 decided_by=decision_ref（缺失即拒）
         if not request.decision_ref:
             raise TokenMintError("decision_ref is required (decided_by audit)")  # 防御：构造已挡
 
-        # 2) TTL 帽（TTL≤1h；**严格 int**——bool 是 int 子类，isinstance 会把
+        # 2) 扩缩权不对称：缩权不进来（OPA 拒），扩权与硬清单从这里出（升级对象）。
+        #    先于 TTL/快照/scope 检查——硬清单请求无论其它字段如何都必须产出
+        #    升级对象留痕（grok 红队 H2b/N5）。
+        self._guard_escalation(request)
+
+        # 3) TTL 帽（TTL≤1h；**严格 int**——bool 是 int 子类，isinstance 会把
         #    True 放行成 1 秒令牌，grok 红队 H4，故用 type() is int）
         if type(request.ttl_seconds) is not int or request.ttl_seconds <= 0:
             raise TokenMintError(f"ttl_seconds must be a positive int, got {request.ttl_seconds!r}")
         if request.ttl_seconds > TOKEN_TTL_CAP_SECONDS:
             raise TokenMintError(
                 f"ttl_seconds {request.ttl_seconds} exceeds cap {TOKEN_TTL_CAP_SECONDS} (v2.1 §4.5)")
-
-        # 3) 扩缩权不对称：缩权不进来（OPA 拒），扩权与硬清单从这里出（升级对象）。
-        #    先于快照/scope 检查——硬清单请求无论 scope/快照如何都必须产出升级对象
-        #    留痕（grok 红队 H2b：原先被后续 TokenMintError 抢先，升级零留痕）。
-        self._guard_escalation(request)
 
         # 4) 五交集快照必须携带（grok 红队 H2：快照缺省 → 扩权检查被静默跳过 →
         #    scope 收敛无从证明；OPA 中间件本就持有五交集，铸造时随决策引用传入）
@@ -301,8 +307,7 @@ class PlatformTokenMinter:
                 "verified without it (an empty snapshot silently skipped the expansion check)")
 
         # 5) scope 非空（目录里显式空 scope 的非硬清单类在这里被挡住）
-        scopes = tuple(request.scopes)
-        if not scopes:
+        if not tuple(request.scopes):
             raise TokenMintError(
                 f"task_class {request.task_class!r} declares no scopes "
                 "(empty-scope catalog entries are escalation-only, never minted)")
@@ -313,7 +318,19 @@ class PlatformTokenMinter:
                 "no signer bound — the minter never signs by itself (proxy-signing forbidden); "
                 "bind a platform adapter signer backed by a bao-held key")
 
-        # 7) 签名（每次铸造都走签名器——禁缓存）+ 登记留痕
+    def mint(self, request: TokenRequest) -> MintedToken:
+        """每次铸造：全量校验（升级守卫第一）→ 签名 → 登记。
+
+        同参数重复调用**必然产出新 token**（禁缓存）：token_ref 取 uuid4，签名器
+        每次都重新调用，无任何返回旧结果的路径。
+        如实边界（grok 复核 N3）：登记簿与 mint_log 是 **append-only 审计面**，
+        本模块不做清理/轮换（轮换会破坏审计完整性）；长驻进程应把留痕持久化到
+        DDL（[待接线] glue.escalation_event 同款机制）后重建实例。
+        """
+        self.precheck(request)
+        scopes = tuple(request.scopes)
+
+        # 签名（每次铸造都走签名器——禁缓存）+ 登记留痕
         now = self._now()
         claims = {
             "task_class": request.task_class,
@@ -504,12 +521,12 @@ class GitHubAppInstallationFlow:
         return dict(claims)
 
     def mint_installation_token(self, request: TokenRequest) -> Tuple[MintedToken, dict]:
-        """两跳全流程，返回 (铸造结果, 原始响应引用)。TTL 超帽/硬清单/扩权照拒。"""
-        # 严格 int（同 H4：bool 是 int 子类）
-        if type(request.ttl_seconds) is not int or request.ttl_seconds <= 0 \
-                or request.ttl_seconds > TOKEN_TTL_CAP_SECONDS:
-            raise TokenMintError(
-                f"ttl_seconds must be in (0, {TOKEN_TTL_CAP_SECONDS}]")
+        """两跳全流程，返回 (铸造结果, 原始响应引用)。TTL 超帽/硬清单/扩权照拒。
+
+        **全量守卫先行**（grok 复核 N6）：签名与换票之前先 ``precheck``——否则
+        拒绝路径上平台侧 installation token 已签发、无人回收。
+        """
+        self._minter.precheck(request)                     # 守卫在两跳之前（含升级留痕）
         jwt_claims = self.installation_jwt_claims()
         jwt_signed = self._signer(dict(jwt_claims))            # 第一跳：bao 私钥侧签名
 
