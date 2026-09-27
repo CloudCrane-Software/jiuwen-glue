@@ -42,6 +42,7 @@ PANE_CHALLENGES = "pane-challenges"
 PANE_DECISIONS = "pane-decisions"
 PANE_NODES = "pane-nodes"
 PANE_USAGE = "pane-usage"
+PANE_TIMELINE = "pane-timeline"
 
 _HEARTBEAT_WARN = 900.0     # 心跳超过 15 分钟视为可疑（展示层提示，不做决策）
 
@@ -167,6 +168,7 @@ class ConsoleApp(App):
             yield TabPane("决策记录", DataTable(id="decisions"), id=PANE_DECISIONS)
             yield TabPane("节点利用率", DataTable(id="nodes"), id=PANE_NODES)
             yield TabPane("计量", DataTable(id="usage"), id=PANE_USAGE)
+            yield TabPane("意图时间线", DataTable(id="timeline"), id=PANE_TIMELINE)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -182,6 +184,8 @@ class ConsoleApp(App):
         nodes.add_columns("节点", "CPU份额", "GPU份额", "信任", "并行", "在线窗口")
         usage = self.query_one("#usage", DataTable)
         usage.add_columns("维度", "事件数", "总量", "最早", "最近")
+        timeline = self.query_one("#timeline", DataTable)
+        timeline.add_columns("信号", "来源", "类型", "状态", "推进", "工单", "workflow")
         for dt in self.query(DataTable):
             dt.cursor_type = "row"
         self.action_refresh()
@@ -201,6 +205,7 @@ class ConsoleApp(App):
         self._refresh_decisions()
         self._refresh_nodes()
         self._refresh_usage()
+        self._refresh_timeline()
 
     def _refresh_tower(self) -> None:
         slots = self.query_one("#tower-slots", Vertical)
@@ -264,6 +269,17 @@ class ConsoleApp(App):
             label = USAGE_KIND_LABELS.get(u.kind, u.kind)
             table.add_row(label, str(u.events), format_quantity(u.kind, u.total_quantity),
                           _fmt_ts(u.first_at), _fmt_ts(u.last_at), key=u.kind)
+
+    def _refresh_timeline(self) -> None:
+        """意图时间线（W-11，v2.1 §10：signal_inbox 状态机投影；Temporal 只持
+        编排状态，业务事实在此面板可见——裁决与编排分离的展示面）。"""
+        table = self.query_one("#timeline", DataTable)
+        table.clear()
+        for s in self.store.timeline(limit=30):
+            table.add_row(s.signal_id[:8], s.source, s.type, s.status_label,
+                          str(s.depth) if s.depth >= 0 else "终态",
+                          str(len(s.ticket_refs)) if s.ticket_refs else "-",
+                          s.workflow_id or "-", key=s.signal_id)
 
     def store_now(self) -> float:
         """取数时钟：mock 有可控时钟；pg 用 wall clock（仅展示剩余秒）。"""

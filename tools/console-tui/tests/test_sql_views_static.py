@@ -33,6 +33,17 @@ VIEWS_FROM_OPS_004 = {
 
 # W-06 裁决卡：glue.v_readiness_card 的 DDL 随 glue.escalation 模块落库
 # （[待 DDL]）——先按消费契约对账 SELECT 列（与 ReadinessCardRow 字段同构）。
+
+# W-11 意图时间线：glue.v_signal_timeline 定义在 CNB company-ops
+# ops/sql/007_signal_inbox.sql（跨仓 DDL，本仓不可见）——按消费契约对账
+# SELECT 列（与 SignalTimelineRow 字段同构）；已落库 srv-1 jiuwen_team。
+VIEWS_FROM_OPS_007 = {
+    "glue.v_signal_timeline": ["signal_id", "source", "type", "status",
+                               "prop_ref", "guardrail_run_ref", "workflow_id",
+                               "ticket_refs", "created_at",
+                               "last_transition_at", "transition_count",
+                               "last_reason_code"],
+}
 VIEWS_PENDING_DDL_W06 = {
     "glue.v_readiness_card": ["card_id", "task_ref", "task_title", "signature",
                               "category", "pieces", "missing", "ready",
@@ -79,7 +90,8 @@ def test_data_pg_queries_align_with_views():
     data = DATA_PATH.read_text(encoding="utf-8")
     sql_text = SQL_PATH.read_text(encoding="utf-8")
     used_views = set(re.findall(r"FROM (glue\.v_\w+)", data))
-    assert used_views == set(VIEWS) | set(VIEWS_FROM_OPS_004) | set(VIEWS_PENDING_DDL_W06), \
+    assert used_views == (set(VIEWS) | set(VIEWS_FROM_OPS_004)
+                          | set(VIEWS_PENDING_DDL_W06) | set(VIEWS_FROM_OPS_007)), \
         f"取数视图与视图清单不对齐: {used_views}"
     for view in used_views & set(VIEWS):
         assert f"CREATE OR REPLACE VIEW {view}" in sql_text
@@ -87,6 +99,9 @@ def test_data_pg_queries_align_with_views():
     assert usage_select is not None, "缺 _Q_USAGE 取数"
     for field in VIEWS_FROM_OPS_004["glue.v_usage"]:
         assert field in usage_select.group(1), f"v_usage 取数缺列 {field!r}"
+    timeline_sql = data[data.index("_Q_TIMELINE = ("):data.index("_Q_TASK_PAUSED")]
+    for field in VIEWS_FROM_OPS_007["glue.v_signal_timeline"]:
+        assert field in timeline_sql, f"v_signal_timeline 取数缺列 {field!r}"
     cards_sql = data[data.index("_Q_CARDS = ("):data.index("_Q_CARD_SELECT")]
     for field in VIEWS_PENDING_DDL_W06["glue.v_readiness_card"]:
         assert field in cards_sql, f"v_readiness_card 取数缺列 {field!r}"
