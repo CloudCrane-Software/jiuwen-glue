@@ -11,7 +11,9 @@ docs/native-handbook-boundary-check.md；openJiuwen 原生 core.security.guardra
 4. Guardrail 验收协议并固化结果             → ``finalize(run_id, seal_ref=...)``
 5. 发布系统执行前主动查询门控结果、终检并执行 → ``gate(run_id)``（fail-closed）
 
-聚合语义（唯一门控输出）:
+聚合语义（唯一门控输出，fail-closed，v2.0 §3.2）:
+- **空集（无任何 check 结论，含检查器缺失/凭证缺失同类信息不足）→ UNKNOWN**——
+  永不 PASS（W-01 缺陷 #2 修复：无证据不放行）；
 - 任一 check BLOCKED → **BLOCKED**；
 - 否则任一 check UNKNOWN（含"必填 check 未提交结论"= 信息不足）→ **UNKNOWN**；
 - 否则 **PASS**。
@@ -71,8 +73,17 @@ _TERMINAL_STATES = (RUN_FINALIZED, RUN_VOID)
 
 
 def aggregate(verdicts: Iterable[str]) -> str:
-    """聚合语义（纯函数）：任一 BLOCKED → BLOCKED；否则任一 UNKNOWN → UNKNOWN；否则 PASS。"""
+    """聚合语义（纯函数，fail-closed，v2.0 §3.2）：
+
+    - **空集 → UNKNOWN**（W-01 缺陷 #2 修复：无任何结论 = 检查器缺失/凭证缺失
+      同类的信息不足，永不 PASS——无证据不放行）；
+    - 任一 BLOCKED → BLOCKED；
+    - 否则任一 UNKNOWN → UNKNOWN；
+    - 否则 PASS。
+    """
     vs = list(verdicts)
+    if not vs:
+        return VERDICT_UNKNOWN
     if any(v == VERDICT_BLOCKED for v in vs):
         return VERDICT_BLOCKED
     if any(v == VERDICT_UNKNOWN for v in vs):
@@ -291,8 +302,8 @@ class GuardrailRunStore:
 
         - OPEN：未验收固化 = 信息不足 → UNKNOWN（fail-closed）；
         - VOID：现场已变化，原有结论失效 → UNKNOWN（fail-closed）；
-        - FINALIZED：聚合语义——任一 BLOCKED→BLOCKED；否则任一 UNKNOWN 或
-          必填 check 未提交→UNKNOWN；否则 PASS。
+        - FINALIZED：聚合语义——**空集（无任何结论）→ UNKNOWN**；任一 BLOCKED→BLOCKED；
+          否则任一 UNKNOWN 或必填 check 未提交→UNKNOWN；否则 PASS。
         **查询方对 UNKNOWN 必须拒绝执行。**
         """
         run = self.get(run_id)

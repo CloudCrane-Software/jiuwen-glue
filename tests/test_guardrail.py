@@ -49,12 +49,34 @@ def _spec(**over):
 # ── 聚合语义（纯函数）────────────────────────────────────────────────────────
 
 def test_aggregate_semantics():
-    assert aggregate([]) == VERDICT_PASS                       # 无结论不算 BLOCKED/UNKNOWN（由必填检查兜底）
-    assert aggregate([VERDICT_PASS, VERDICT_PASS]) == VERDICT_PASS
+    """聚合语义（v2.0 §3.2，W-01 缺陷 #2 修复）：fail-closed——
+    空集（无任何结论=检查器缺失/凭证缺失同类信息不足）→ UNKNOWN，永不 PASS。"""
+    assert aggregate([]) == VERDICT_UNKNOWN                    # 空集 = 无证据不放行
+    assert aggregate([VERDICT_UNKNOWN]) == VERDICT_UNKNOWN     # 单 UNKNOWN → UNKNOWN
+    assert aggregate([VERDICT_BLOCKED]) == VERDICT_BLOCKED     # 单 BLOCKED → BLOCKED
+    assert aggregate([VERDICT_PASS, VERDICT_PASS]) == VERDICT_PASS  # 全 PASS → PASS
     assert aggregate([VERDICT_PASS, VERDICT_BLOCKED]) == VERDICT_BLOCKED
     assert aggregate([VERDICT_PASS, VERDICT_UNKNOWN]) == VERDICT_UNKNOWN
     # 优先级：任一 BLOCKED 压过 UNKNOWN
     assert aggregate([VERDICT_UNKNOWN, VERDICT_BLOCKED]) == VERDICT_BLOCKED
+
+
+def test_aggregate_fail_closed_end_to_end(clock):
+    """空集聚合经 store.gate()/admission 全链路仍是 UNKNOWN（fail-closed 贯通）。
+
+    对应 v2.0 §3.2 修复缺陷 #2：此前 spec 无 check 或全为可选未提交时，
+    FINALIZED run 的 gate() 会返回 PASS（fail-open）。
+    """
+    from jiuwen_glue import guardrail_verdict_of
+    store = GuardrailRunStore(now=clock)
+    # spec 不声明任何 check → 无结论可提交
+    run = store.create_run(_spec(checks=()))
+    store.finalize(run.run_id, seal_ref="w01-empty")
+    result = store.gate(run.run_id)
+    assert result.state == RUN_FINALIZED
+    assert result.verdict == VERDICT_UNKNOWN                   # 空集 → UNKNOWN（不再 PASS）
+    assert result.executable is False
+    assert guardrail_verdict_of(run) == VERDICT_UNKNOWN        # admission 侧同语义
 
 
 # ── 五步链路 ─────────────────────────────────────────────────────────────────

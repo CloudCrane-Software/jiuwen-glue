@@ -13,7 +13,9 @@
 - **过期 expire**：到达 expires_at 的租约在触碰时惰性转 EXPIRED；也可显式 expire。
   过期只作用于本租约（子租约额度在派生时已从父划出、已承诺，不随父过期回收）。
 - **撤销 revoke**：级联——撤销父租约时所有后代租约一并 REVOKED（"级联撤销"），
-  未花完的额度随之作废；之后任何占用被拒（LeaseRevokedError）。
+  未花完的额度随之作废；之后任何占用被拒（LeaseRevokedError）。级联遍历独立于
+  本节点状态：父租约已终态（EXPIRED/EXHAUSTED，含惰性过期）不阻止后代被撤销
+  （v2.0 §3.3，W-01 缺陷 #1 修复）。
 - 所有事件（含被拒绝的占用）追加进 audit 日志：检测 = 拒绝 + 留痕。
 - **权限交集联动（v1.7 §12.5，WO-0003 返工）**：签发时可传入
   identity.effective_permissions 的求值结果并**固化进租约**（perms 快照 + 三层身份
@@ -248,20 +250,30 @@ class BudgetLedger:
     # ── 撤销（级联） ──────────────────────────────────────────────────────
 
     def revoke(self, lease_id: str, *, reason: str = "") -> List[str]:
-        """撤销租约并级联撤销全部后代租约；返回被撤销的 lease_id 列表。"""
+        """撤销租约并级联撤销全部后代租约；返回被撤销的 lease_id 列表。
+
+        级联语义（v2.0 §3.3，W-01 缺陷 #1 修复）：级联遍历**独立于本节点状态**——
+        本节点已是终态（EXPIRED/EXHAUSTED/REVOKED，含惰性过期）不阻止其后代被
+        继续撤销，已死父租约下的 ACTIVE 子租约不再成为孤儿；本租约惰性过期在
+        本次撤销调用内同步生效后仍照常级联。终态节点保持原状态（不重复落
+        REVOKED），仅继续向下遍历。
+        """
         self.get(lease_id)  # UnknownLeaseError if absent
+        # 惰性过期在撤销路径上同步生效（触碰即刷新）；随后级联遍历不因终态而中断。
+        self._refresh(self._leases[lease_id], self._now())
         revoked: List[str] = []
         stack = [lease_id]
         while stack:
             cur = stack.pop()
             lease = self._leases[cur]
-            if lease.status in _TERMINAL:
-                continue
-            lease.status = REVOKED
-            lease.revoked_at = self._now()
-            lease.revoke_reason = reason or None
-            revoked.append(cur)
-            self._log(cur, "REVOKE", reason=reason, cascade=(cur != lease_id))
+            if lease.status not in _TERMINAL:
+                lease.status = REVOKED
+                lease.revoked_at = self._now()
+                lease.revoke_reason = reason or None
+                revoked.append(cur)
+                self._log(cur, "REVOKE", reason=reason, cascade=(cur != lease_id))
+            # 终态节点：不重复撤销，但**必须继续遍历后代**——
+            # 级联是否触达后代与本节点状态无关（v2.0 §3.3）。
             stack.extend(l.lease_id for l in self.children_of(cur))
         return revoked
 
