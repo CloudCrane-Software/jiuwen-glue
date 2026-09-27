@@ -17,6 +17,7 @@
 - 准入记录（WO-0007 件 2：消融+GuardrailRun 硬规则，绑定 Spec 版本）     → :mod:`jiuwen_glue.admission`
 - usage_events 计量四维度 + 租约-Higress consumer 绑定（断流求值）       → :mod:`jiuwen_glue.usage`
 - 升级阶梯状态机 L0-L5 + 人类就绪包四件套（v2.1 §4.7）                  → :mod:`jiuwen_glue.escalation`
+- 平台 token 铸造器（TTL≤1h/禁缓存禁代签/decided_by 留痕，v2.1 §4.5）   → :mod:`jiuwen_glue.platform_tokens`
 
 边界（写死）: 原生层管"怎么做"，glue 管"准不准进"，控制台管"看得见"；
 发现与编排一律用原生 Symphony，本包不自建发现机制；
@@ -198,6 +199,24 @@ from .identity import (
     narrow_delegation,
 )
 from .leases import ACTIVE, EXHAUSTED, EXPIRED, REVOKED, BudgetLedger, BudgetLease
+from .platform_tokens import (
+    BAO_REF_PREFIX,
+    PLATFORMS,
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    STATUS_REVOKED,
+    TOKEN_TTL_CAP_SECONDS,
+    GITHUB_JWT_TTL_CAP_SECONDS,
+    ESCALATION_KIND,
+    GitHubAppInstallationFlow,
+    HardListEscalationError,
+    MintedToken,
+    PlatformTokenMinter,
+    TokenMintError,
+    TokenRequest,
+    escalation_signal,
+    hard_list_readiness,
+)
 from .promotion import (
     GATE_BLOCKED,
     GATE_PASS,
@@ -377,5 +396,12 @@ __all__ = [
     "render_readiness", "signature_for",
     "EscalationSchemaError", "EscalationStateError", "EscalationStormError",
     "EscalationRequiredError", "UnknownEscalationCaseError",
+    # platform_tokens（平台 token 铸造器，v2.1 §4.5 / 工单 W-09）
+    "TOKEN_TTL_CAP_SECONDS", "GITHUB_JWT_TTL_CAP_SECONDS", "PLATFORMS", "BAO_REF_PREFIX",
+    "ESCALATION_KIND",
+    "STATUS_ACTIVE", "STATUS_EXPIRED", "STATUS_REVOKED",
+    "PlatformTokenMinter", "TokenRequest", "MintedToken",
+    "GitHubAppInstallationFlow", "escalation_signal", "hard_list_readiness",
+    "TokenMintError", "HardListEscalationError",
     "__version__",
 ]
