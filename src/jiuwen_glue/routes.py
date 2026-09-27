@@ -125,6 +125,8 @@ class NodeCapacity:
     trust_level: str = TRUST_TRUSTED  # trusted | untrusted（不可信节点只派沙箱任务类）
     max_parallel: int = 1            # 最大并行任务数
     online_window: str = "always"    # 在线窗口声明（如 "always" / "09:00-18:00+08"）
+    gpu_priority: int = 0            # GPU 优先级（调度 P2，v2.0 §10 M2）：越大越优先；
+                                     # 仅 best-fit 策略消费（P1 排序键锁定不变）
     tenant_id: str = "t0"
 
     def __post_init__(self) -> None:
@@ -135,6 +137,10 @@ class NodeCapacity:
             if not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
                 raise CapacitySchemaError(
                     f"{name} must be a float in [0.0, 1.0], got {v!r}")
+        if isinstance(self.gpu_priority, bool) or \
+                not isinstance(self.gpu_priority, int) or self.gpu_priority < 0:
+            raise CapacitySchemaError(
+                f"gpu_priority must be an int >= 0, got {self.gpu_priority!r}")
         if self.trust_level not in _TRUST_LEVELS:
             raise CapacitySchemaError(
                 f"trust_level must be one of {_TRUST_LEVELS}, got {self.trust_level!r}")

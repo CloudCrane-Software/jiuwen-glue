@@ -6,7 +6,9 @@
   不验签）、NodeRegistration/NodeRecord、FleetRegistry（register/heartbeat/
   deregister + STALE 心跳超窗兜底）、可选 SQL 持久化接口（glue.node 对齐）。
 - :mod:`jiuwen_glue.fleet.scheduler` — TaskOffering/Assignment/Rejected、
-  P1 贪心 :func:`assign`、ShareLedger 份额记账、WorkQueue/WorkOrder 工单队列、
+  P1 贪心 :func:`assign`（策略 ``greedy``，默认）+ P2 bin-packing
+  :func:`rank_key_best_fit`（策略 ``best-fit``，v2.0 §10 M2；抢占语义 [待]）、
+  ShareLedger 份额记账、WorkQueue/WorkOrder 工单队列、
   DispatchMode（调度制）/ SelfPickMode（自取制 + TTL 回收）、Budget Lease 派生。
 - :mod:`jiuwen_glue.fleet.worker` — 自取制客户端协议（模拟侧）：WorkerLoop.tick、
   WorkerContext（lease_scoped_secrets 只允许引用）。
@@ -64,6 +66,9 @@ from .scheduler import (
     REJECT_TTL_CAP,
     REJECT_TOOLS,
     REJECT_TRUST,
+    SCHED_POLICIES,
+    SCHED_POLICY_BEST_FIT,
+    SCHED_POLICY_GREEDY,
     Assignment,
     DispatchMode,
     GreedyScheduler,
@@ -74,6 +79,7 @@ from .scheduler import (
     WorkOrder,
     WorkQueue,
     assign,
+    rank_key_best_fit,
     secret_ref_ok,
 )
 from .worker import TickResult, WorkerContext, WorkerLoop
@@ -96,7 +102,9 @@ __all__ = [
     "REJECT_GPU", "REJECT_SLOT", "REJECT_OFFLINE", "REJECT_GUARDRAIL",
     "REJECT_STALE", "REJECT_TENANT", "REJECT_TTL_CAP", "REJECT_QUEUE_EMPTY",
     "REJECT_LEASE",
+    "SCHED_POLICY_GREEDY", "SCHED_POLICY_BEST_FIT", "SCHED_POLICIES",
     "TaskOffering", "Assignment", "Rejected", "ShareLedger", "assign",
+    "rank_key_best_fit",
     "GreedyScheduler", "DispatchMode", "SelfPickMode",
     "WorkOrder", "WorkQueue", "secret_ref_ok",
     # worker（自取制客户端协议，模拟侧）

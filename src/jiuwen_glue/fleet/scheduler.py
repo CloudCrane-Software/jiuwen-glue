@@ -1,12 +1,18 @@
 # coding: utf-8
-"""fleet 调度器 P1 贪心（PROP-0004 / PROP-0001 v1.7 §12.6/§13）— WO-0011.
+"""fleet 调度器 P1 贪心 + P2 bin-packing（PROP-0004 / v1.7 §12.6/§13；v2.0 §10 M2）— WO-0011 / W-04.
 
 规格来源（PROP-0004 三阶段：P1 贪心 → P2 利用率优化 → P3 云突发伸缩）:
 
-- **P1 贪心**（本模块）：``assign(offering, registry) -> Assignment | Rejected``
+- **P1 贪心**（默认策略 ``greedy``）：``assign(offering, registry) -> Assignment | Rejected``
   过滤（can_take / 信任等级 / 在线窗口 / GPU 份额余量 / 并行余量）→
   按（信任等级降序、空闲 gpu_frac 降序、max_parallel 余量降序）排序取首，
   node_id 升序为最终确定性 tie-break。
+- **P2 bin-packing**（策略 ``best-fit``，W-04 / v2.0 §10 M2 利用率优化）：
+  :func:`rank_key_best_fit` 按"放置后 gpu_frac 剩余最小"排序（装得更满、碎片
+  最少），平局比节点 GPU 优先级（``NodeCapacity.gpu_priority`` 大者优先），
+  再按 node_id 确定性 tie-break；P1 排序键锁定不变（既有测试语义）。
+  **优先级抢占**：``TaskOffering.preempt_ok`` 只加字段与声明校验（无优先级的
+  抢占声明 = 构造错误），**抢占语义 [待]**——本工单不实现任何真实驱逐。
 - **硬规则（写死）**：不可信节点只接沙箱任务类（sandbox_class）——产物隔离 +
   人工复核；Assignment 携带 ``sandbox_only`` 与 ``review_required``，
   复核流程归控制台（WO-0012）。谓词基元复用 ``routes.NodeCapacity.can_take``。
@@ -59,8 +65,9 @@ __all__ = [
     "REJECT_TENANT",
     "REJECT_GPU", "REJECT_SLOT", "REJECT_OFFLINE", "REJECT_GUARDRAIL",
     "REJECT_STALE", "REJECT_TTL_CAP", "REJECT_QUEUE_EMPTY", "REJECT_LEASE",
+    "SCHED_POLICY_GREEDY", "SCHED_POLICY_BEST_FIT", "SCHED_POLICIES",
     "TaskOffering", "Assignment", "Rejected", "ShareLedger",
-    "assign", "GreedyScheduler", "DispatchMode", "SelfPickMode",
+    "assign", "rank_key_best_fit", "GreedyScheduler", "DispatchMode", "SelfPickMode",
     "WorkOrder", "WorkQueue", "SECRET_REF_PATTERN", "secret_ref_ok",
 ]
 
@@ -73,6 +80,14 @@ DEFAULT_SELF_PICK_LEASE_SECONDS = 900.0
 
 DISPATCH_DIRECT = "dispatch"        # 调度制：控制台直接派
 DISPATCH_SELF_PICK = "self-pick"    # 自取制：节点认领
+
+# 调度策略（PROP-0004 三阶段；P2 = 利用率优化，v2.0 §10 M2）：
+# - greedy：P1 贪心（信任降序 → 空闲 gpu_frac 降序 → 并行余量降序 → node_id），键锁定不变；
+# - best-fit：P2 bin-packing 排序（按 gpu_frac 放置后剩余最小者优先 = 装得更满），
+#   平局先比节点 GPU 优先级（gpu_priority 大者优先），再按 node_id 确定性 tie-break。
+SCHED_POLICY_GREEDY = "greedy"
+SCHED_POLICY_BEST_FIT = "best-fit"
+SCHED_POLICIES = (SCHED_POLICY_GREEDY, SCHED_POLICY_BEST_FIT)
 
 ASSIGN_ACTIVE = "ACTIVE"
 ASSIGN_COMPLETED = "COMPLETED"
@@ -110,6 +125,12 @@ class TaskOffering:
     guardrail_verdict: Optional[str] = None        # PASS 之外的 verdict → fail-closed 拒绝
     parent_lease_id: Optional[str] = None          # 自取制认领时从父租约派生（额度/权限收敛）
     effective_perms: Optional[EffectivePerms] = None  # 权限交集快照（固化进派生租约）
+    gpu_priority: int = 0                          # 任务侧 GPU 优先级（P2）：越大越优先；
+                                                   # 仅 best-fit 策略参与排序，greedy 不消费
+    preempt_ok: bool = False                       # 优先级抢占标志（P2）：声明"本任务可抢占
+                                                   # 低优先级派工"。**抢占语义 [待]**——本工单
+                                                   # 只加字段：flag 不触发任何真实驱逐，仅随
+                                                   # Assignment 落账留待将来执行路径消费。
     tenant_id: str = "t0"
 
     def __post_init__(self) -> None:
@@ -119,6 +140,15 @@ class TaskOffering:
                 not (0.0 <= float(self.gpu_demand) <= 1.0):
             raise SchedulingError(
                 f"gpu_demand must be a float in [0.0, 1.0], got {self.gpu_demand!r}")
+        if isinstance(self.gpu_priority, bool) or \
+                not isinstance(self.gpu_priority, int) or self.gpu_priority < 0:
+            raise SchedulingError(
+                f"gpu_priority must be an int >= 0, got {self.gpu_priority!r}")
+        if self.preempt_ok and self.gpu_priority <= 0:
+            # fail-closed：无优先级的抢占声明没有意义（抢占比的就是优先级）
+            raise SchedulingError(
+                "preempt_ok=True requires gpu_priority > 0 "
+                "(a preemption claim without a priority is meaningless)")
         if self.trust_required is not None and \
                 self.trust_required not in (TRUST_TRUSTED, TRUST_UNTRUSTED):
             raise SchedulingError(
@@ -156,6 +186,8 @@ class Assignment:
     release_reason: Optional[str] = None
     artifact_ref: Optional[str] = None    # 完成时的产物**引用**（不复制产物）
     tenant_id: str = "t0"
+    preempt_ok: bool = False              # offering 抢占声明的落账回声（语义 [待]，
+                                          # 本工单只随账记录，不触发驱逐）
 
 
 @dataclass(frozen=True)
@@ -238,8 +270,8 @@ def _evaluate(offering: TaskOffering, record: NodeRecord, *,
 
 
 def _rank_key(record: NodeRecord, ledger: Optional[ShareLedger]) -> Tuple[float, ...]:
-    """贪心排序键：信任等级降序 → 空闲 gpu_frac 降序 → max_parallel 余量降序
-    → node_id 升序（确定性 tie-break）。"""
+    """P1 贪心排序键：信任等级降序 → 空闲 gpu_frac 降序 → max_parallel 余量降序
+    → node_id 升序（确定性 tie-break）。键锁定不变（既有 P1 测试语义）。"""
     cap = record.capacity
     committed = ledger.committed_gpu(cap.node_id) if ledger else 0.0
     slots = ledger.active_slots(cap.node_id) if ledger else 0
@@ -248,16 +280,37 @@ def _rank_key(record: NodeRecord, ledger: Optional[ShareLedger]) -> Tuple[float,
     return (-trust_rank, -free_gpu, -(cap.max_parallel - slots), cap.node_id)
 
 
+def rank_key_best_fit(record: NodeRecord, ledger: Optional[ShareLedger],
+                      gpu_demand: float) -> Tuple[float, ...]:
+    """P2 bin-packing 排序键（best-fit by gpu_frac，v2.0 §10 M2 利用率优化）：
+
+    放置后剩余 (free_gpu − demand) **最小**者优先 → 碎片最小、装得最满；
+    平局 → 节点 gpu_priority 降序（GPU 优先级高者先拿到任务）；
+    再平 → node_id 升序（确定性 tie-break）。
+    只对**已过过滤链**的候选求值（调用方保证 demand ≤ free_gpu）。
+    """
+    cap = record.capacity
+    committed = ledger.committed_gpu(cap.node_id) if ledger else 0.0
+    free_gpu = round(cap.gpu_frac - committed, 9)
+    leftover = round(free_gpu - float(gpu_demand), 9)
+    return (leftover, -cap.gpu_priority, cap.node_id)
+
+
 def assign(offering: TaskOffering, registry: FleetRegistry, *,
            ledger: Optional[ShareLedger] = None,
-           now: Optional[float] = None) -> Union[Assignment, Rejected]:
-    """P1 贪心派工（纯决策 + 可选落账）。
+           now: Optional[float] = None,
+           policy: str = SCHED_POLICY_GREEDY) -> Union[Assignment, Rejected]:
+    """派工（纯决策 + 可选落账）。``policy``：``greedy``（P1，默认）|
+    ``best-fit``（P2 bin-packing，见 :func:`rank_key_best_fit`）；
+    未知策略名 → SchedulingError（fail-closed，不静默回退）。
 
     过滤 → 排序取首；无可派节点 → Rejected（含各过滤器命中计数）。
     ``ledger`` 缺省为 None = 只决策不落账（dry-run 语义）；
     :class:`GreedyScheduler` 总是传入共享账本完成真实记账。
     """
     now = time.time() if now is None else now
+    if policy not in SCHED_POLICIES:
+        raise SchedulingError(f"unknown scheduling policy: {policy!r}")
     if offering.guardrail_run_ref is not None and \
             offering.guardrail_verdict != VERDICT_PASS:
         return Rejected(
@@ -276,7 +329,8 @@ def assign(offering: TaskOffering, registry: FleetRegistry, *,
         if reason is not None:
             counts[reason] = counts.get(reason, 0) + 1
             continue
-        key = _rank_key(record, ledger)
+        key = (_rank_key(record, ledger) if policy == SCHED_POLICY_GREEDY
+               else rank_key_best_fit(record, ledger, offering.gpu_demand))
         if best is None or key < best_key:
             best, best_key = record, key
     if best is None:
@@ -301,6 +355,7 @@ def assign(offering: TaskOffering, registry: FleetRegistry, *,
         review_required=cap.sandbox_only,
         assigned_at=now,
         tenant_id=offering.tenant_id,
+        preempt_ok=offering.preempt_ok,
     )
     if ledger is not None:
         ledger.commit(assignment.assignment_id, best.node_id,
@@ -454,11 +509,15 @@ class GreedyScheduler:
 
     def __init__(self, registry: FleetRegistry, *, now: Optional[Callable[[], float]] = None,
                  budget: Optional[BudgetLedger] = None,
-                 max_self_pick_lease: float = MAX_SELF_PICK_LEASE_SECONDS) -> None:
+                 max_self_pick_lease: float = MAX_SELF_PICK_LEASE_SECONDS,
+                 policy: str = SCHED_POLICY_GREEDY) -> None:
+        if policy not in SCHED_POLICIES:
+            raise SchedulingError(f"unknown scheduling policy: {policy!r}")
         self._registry = registry
         self._now = now or time.time
         self._budget = budget
         self.max_self_pick_lease = float(max_self_pick_lease)
+        self.policy = policy
         self._ledger = ShareLedger()
         self.assignments: Dict[str, Assignment] = {}
         self.audit: List[Dict[str, object]] = []
@@ -467,7 +526,8 @@ class GreedyScheduler:
 
     def assign(self, offering: TaskOffering, *, dispatch: str = DISPATCH_DIRECT,
                lease_ttl: Optional[float] = None,
-               now: Optional[float] = None) -> Union[Assignment, Rejected]:
+               now: Optional[float] = None,
+               policy: Optional[str] = None) -> Union[Assignment, Rejected]:
         now = self._now() if now is None else now
         if dispatch not in (DISPATCH_DIRECT, DISPATCH_SELF_PICK):
             raise SchedulingError(f"unknown dispatch mode: {dispatch!r}")
@@ -483,7 +543,8 @@ class GreedyScheduler:
                            "tokens are short-lived, <=1h)")
         else:
             ttl = None
-        result = assign(offering, self._registry, ledger=self._ledger, now=now)
+        result = assign(offering, self._registry, ledger=self._ledger, now=now,
+                        policy=policy or self.policy)
         if isinstance(result, Rejected):
             self.audit.append({"event": "ASSIGN_REJECTED", "at": now,
                                "task_ref": offering.task_ref,
