@@ -1,0 +1,32 @@
+# glue-governance Harness Package（jiuwenswarm 最小门禁扩展包）
+#
+# 格式依据：
+#   - 字段白名单：jiuwenswarm/jiuwenswarm/agents/harness/common/auto_harness/service.py:207-224
+#     （develop@52abe68；_ALLOWED_HARNESS_CONFIG_FIELDS / _ALLOWED_RESOURCES_SUBFIELDS）
+#   - v1 flat 声明：tools/skills 直接置于顶层（extension_loader.py:668-712）
+#   - 禁止字段 mcps（service.py:227-258 导入/激活时拒绝）
+#   - 路径约束：所有 file:/dir: 相对包根，禁止绝对路径与 .. 越界（service.py:285-355）
+schema_version: expert_harness.v1
+
+id: glue-governance
+name: Glue Governance Package
+description: >-
+  把 jiuwen-glue 治理对象接入 jiuwenswarm agent 的最小门禁扩展包：GuardrailRun
+  五步门控（fail-closed，聚合 verdict 唯一门控输出）、结构化 Challenge 授权三态审批、
+  append-only 决策记录。三个工具均为 jiuwen_glue 的薄封装，不复制其源码、不新增第二个决策点。
+
+tools:
+  - file: tools/guardrail_gate_tool.py
+    class: GuardrailGateTool
+  - file: tools/challenge_board_tool.py
+    class: ChallengeBoardTool
+  - file: tools/decision_log_tool.py
+    class: DecisionLogTool
+
+skills:
+  - dir: skills/glue-governance
+
+metadata:
+  # jiuwenswarm 宿主环境需先 pip install jiuwen-glue；metadata 字段在白名单内，供部署自检
+  dependencies: ["jiuwen-glue>=0.2.0"]
+  source_repo: https://github.com/CloudCrane-Software/jiuwen-glue
