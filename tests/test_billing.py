@@ -354,6 +354,14 @@ def test_rate_change_does_not_alter_history():
         select_rate_card([card_v1, v2_shifted], at=CARD_V1_FROM + 3600)
 
 
+def test_rate_card_rejects_placeholder_customer():
+    """红队 finding B7（grok R2）修复：占位客户卡在构造期即拒——
+    README 规则"占位符出现在任何实卡中即为无效卡"由代码强制。"""
+    for bogus in ("[待客户]", "<customer_id>", "cust-[待定]"):
+        with pytest.raises(BillingSchemaError, match="placeholder marker"):
+            parse_rate_card(_card_mapping(customer=bogus))
+
+
 def test_select_rate_card_effective_windows():
     v1 = parse_rate_card(_card_mapping(
         card_id="rc-seq-1", version=1))                       # from 2026-10-01, open end

@@ -584,6 +584,11 @@ class RateCard:
             v = getattr(self, name)
             if not v or not isinstance(v, str):
                 raise BillingSchemaError(f"rate card {name} must be non-empty")
+        if any(marker in self.customer_id for marker in ("<", "[待")):
+            raise BillingSchemaError(
+                f"rate card customer_id carries a placeholder marker: "
+                f"{self.customer_id!r} (占位卡无效——billing/README.md：占位符出现"
+                f"即为无效卡，永不入结算)")
         if not isinstance(self.version, int) or isinstance(self.version, bool) \
                 or self.version < 1:
             raise BillingSchemaError(f"rate card version must be int >= 1")
