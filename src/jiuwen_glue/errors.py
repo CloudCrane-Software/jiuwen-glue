@@ -219,3 +219,17 @@ class UsageSchemaError(UsageError):
 
 class UsageStateError(UsageError):
     """绑定状态非法转移（终态再转移 / 未知 binding）。"""
+
+
+# ── Billing（计费 P0）─────────────────────────────────────────────────────────
+
+class BillingError(GlueError):
+    """计费基类错误（归集/影子成本周报/费率卡结算，计费 P0）。"""
+
+
+class BillingSchemaError(BillingError):
+    """计费声明结构不合法（费率卡字段缺失 / 快照 hash 不匹配 / 价表条目非法）。"""
+
+
+class BillingSettleError(BillingError):
+    """结算不可进行（事件落在费率卡生效窗外 / 计费项无费率行 fail-closed）。"""

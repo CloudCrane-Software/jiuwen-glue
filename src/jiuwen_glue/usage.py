@@ -21,6 +21,8 @@
 - 内存版是权威实现；Postgres 持久化对应 CNB company-ops
   ``ops/sql/004_usage_events.sql``（glue.usage_event / glue.lease_consumer_binding /
   glue.v_usage / glue.v_binding_cutoff_due），DDL 触发器是第二道闸（append-only）。
+  计费 P0 起事件携带结算三字段 customer_id/project_id/settlement_class（006，
+  四模式枚举同源；billing.py 按 project 归集与结算）。
 - 凭证纪律：consumer_key 是 Higress consumer **名称引用**，密钥明文永不进计量事件；
   本模块不做金额换算（单位由调用方约定，与 leases 同风格）。
 - EXHAUSTED（额度耗尽）是否断流属计费策略，本实现**不含**——cutoff 只认
@@ -39,6 +41,8 @@ from .errors import UsageSchemaError, UsageStateError
 __all__ = [
     "KIND_LLM_RELAY", "KIND_COMPUTE_SECONDS", "KIND_STORAGE_BYTES",
     "KIND_SANDBOX_SECONDS", "USAGE_KINDS",
+    "SETTLEMENT_INTERNAL", "SETTLEMENT_CUSTOMER", "SETTLEMENT_TRIAL",
+    "SETTLEMENT_FREE", "SETTLEMENT_CLASSES",
     "BINDING_ACTIVE", "BINDING_CUTOFF", "BINDING_REVOKED", "BINDING_STATES",
     "CUTOFF_DRY_RUN", "CUTOFF_ENFORCE", "CUTOFF_MODES",
     "REASON_LEASE_EXPIRED", "REASON_LEASE_REVOKED", "REASON_LEASE_LAPSED",
@@ -54,6 +58,15 @@ KIND_STORAGE_BYTES = "storage_bytes"
 KIND_SANDBOX_SECONDS = "sandbox_seconds"
 USAGE_KINDS = (KIND_LLM_RELAY, KIND_COMPUTE_SECONDS, KIND_STORAGE_BYTES,
                KIND_SANDBOX_SECONDS)
+
+# ── 结算模式四枚举（计费 P0 / v2.1 §4.4+§7；DDL 006 ck_usage_event_settlement_class
+#    同源——改枚举 = 改这里 + DDL CHECK，同 PR 同门控，不走旁路）──────────────────
+SETTLEMENT_INTERNAL = "internal"   # 自身消耗（影子成本口径，P0 主模式）
+SETTLEMENT_CUSTOMER = "customer"   # 外部客户（费率卡结算；首个客户 [待客户]，P1）
+SETTLEMENT_TRIAL = "trial"         # 试验车道（v2.1 §7：预算硬顶+两周窗+顾问裁决）
+SETTLEMENT_FREE = "free"           # 免费/折扣窗口资源（只计量不计费）
+SETTLEMENT_CLASSES = (SETTLEMENT_INTERNAL, SETTLEMENT_CUSTOMER,
+                      SETTLEMENT_TRIAL, SETTLEMENT_FREE)
 
 # ── 绑定状态（active → cutoff 网关已断流 / revoked 绑定撤销；均终态不可逆）────
 BINDING_ACTIVE = "active"
@@ -98,6 +111,9 @@ class UsageEvent:
     tenant_id: str = "t0"
     occurred_at: float = 0.0
     meta: Mapping[str, object] = field(default_factory=dict)
+    customer_id: Optional[str] = None    # customer 模式必填（无主账单不可存在）
+    project_id: Optional[str] = None     # internal 模式按 project 归集的主维度
+    settlement_class: str = SETTLEMENT_INTERNAL   # 结算模式四枚举
 
     def __post_init__(self) -> None:
         if self.kind not in USAGE_KINDS:
@@ -118,6 +134,20 @@ class UsageEvent:
             raise UsageSchemaError("consumer_key must be a non-empty string when given")
         if self.occurred_at < 0:
             raise UsageSchemaError("occurred_at must be a non-negative epoch")
+        if self.settlement_class not in SETTLEMENT_CLASSES:
+            raise UsageSchemaError(
+                f"settlement_class must be one of {SETTLEMENT_CLASSES}, "
+                f"got {self.settlement_class!r}")
+        if self.settlement_class == SETTLEMENT_CUSTOMER and \
+                (not self.customer_id or not isinstance(self.customer_id, str)):
+            raise UsageSchemaError(
+                "settlement_class='customer' requires customer_id "
+                "(a bill without a customer must not exist)")
+        for name in ("customer_id", "project_id"):
+            v = getattr(self, name)
+            if v is not None and (not isinstance(v, str) or not v.strip()):
+                raise UsageSchemaError(
+                    f"{name} must be a non-empty string when given")
 
 
 @dataclass(frozen=True)
@@ -153,43 +183,65 @@ class UsageLedger:
                          lease_ref: Optional[str] = None,
                          task_ref: Optional[str] = None,
                          tenant_id: str = "t0",
-                         meta: Optional[Mapping[str, object]] = None) -> UsageEvent:
+                         meta: Optional[Mapping[str, object]] = None,
+                         customer_id: Optional[str] = None,
+                         project_id: Optional[str] = None,
+                         settlement_class: str = SETTLEMENT_INTERNAL) -> UsageEvent:
         """LLM 中继调用计量（按租户 consumer key 维度，§4.4）。"""
         return self.record(UsageEvent(
             event_id=uuid.uuid4().hex, kind=KIND_LLM_RELAY, quantity=quantity,
             consumer_key=consumer_key, lease_ref=lease_ref, task_ref=task_ref,
-            tenant_id=tenant_id, meta=meta or {}))
+            tenant_id=tenant_id, meta=meta or {},
+            customer_id=customer_id, project_id=project_id,
+            settlement_class=settlement_class))
 
     def record_compute_seconds(self, quantity: float, *,
                                node_ref: Optional[str] = None,
                                lease_ref: Optional[str] = None,
                                tenant_id: str = "t0",
-                               meta: Optional[Mapping[str, object]] = None) -> UsageEvent:
+                               meta: Optional[Mapping[str, object]] = None,
+                               customer_id: Optional[str] = None,
+                               project_id: Optional[str] = None,
+                               settlement_class: str = SETTLEMENT_INTERNAL) -> UsageEvent:
         return self.record(UsageEvent(
             event_id=uuid.uuid4().hex, kind=KIND_COMPUTE_SECONDS, quantity=quantity,
             node_ref=node_ref, lease_ref=lease_ref, tenant_id=tenant_id,
-            meta=meta or {}))
+            meta=meta or {}, customer_id=customer_id, project_id=project_id,
+            settlement_class=settlement_class))
 
     def record_storage_bytes(self, quantity: float, *,
                              lease_ref: Optional[str] = None,
                              tenant_id: str = "t0",
-                             meta: Optional[Mapping[str, object]] = None) -> UsageEvent:
+                             meta: Optional[Mapping[str, object]] = None,
+                             customer_id: Optional[str] = None,
+                             project_id: Optional[str] = None,
+                             settlement_class: str = SETTLEMENT_INTERNAL) -> UsageEvent:
         return self.record(UsageEvent(
             event_id=uuid.uuid4().hex, kind=KIND_STORAGE_BYTES, quantity=quantity,
-            lease_ref=lease_ref, tenant_id=tenant_id, meta=meta or {}))
+            lease_ref=lease_ref, tenant_id=tenant_id, meta=meta or {},
+            customer_id=customer_id, project_id=project_id,
+            settlement_class=settlement_class))
 
     def record_sandbox_seconds(self, quantity: float, *,
                                lease_ref: Optional[str] = None,
                                tenant_id: str = "t0",
-                               meta: Optional[Mapping[str, object]] = None) -> UsageEvent:
+                               meta: Optional[Mapping[str, object]] = None,
+                               customer_id: Optional[str] = None,
+                               project_id: Optional[str] = None,
+                               settlement_class: str = SETTLEMENT_INTERNAL) -> UsageEvent:
         return self.record(UsageEvent(
             event_id=uuid.uuid4().hex, kind=KIND_SANDBOX_SECONDS, quantity=quantity,
-            lease_ref=lease_ref, tenant_id=tenant_id, meta=meta or {}))
+            lease_ref=lease_ref, tenant_id=tenant_id, meta=meta or {},
+            customer_id=customer_id, project_id=project_id,
+            settlement_class=settlement_class))
 
     # ── 只读查询 / 聚合 ──────────────────────────────────────────────────
     def events(self, *, tenant_id: Optional[str] = None, kind: Optional[str] = None,
                consumer_key: Optional[str] = None,
-               lease_ref: Optional[str] = None) -> Tuple[UsageEvent, ...]:
+               lease_ref: Optional[str] = None,
+               project_id: Optional[str] = None,
+               customer_id: Optional[str] = None,
+               settlement_class: Optional[str] = None) -> Tuple[UsageEvent, ...]:
         """过滤回放（均只读；返回元组防调用方改内部状态）。"""
         out = []
         for e in self._events:
@@ -200,6 +252,12 @@ class UsageLedger:
             if consumer_key is not None and e.consumer_key != consumer_key:
                 continue
             if lease_ref is not None and e.lease_ref != lease_ref:
+                continue
+            if project_id is not None and e.project_id != project_id:
+                continue
+            if customer_id is not None and e.customer_id != customer_id:
+                continue
+            if settlement_class is not None and e.settlement_class != settlement_class:
                 continue
             out.append(e)
         return tuple(out)
@@ -225,7 +283,9 @@ def replace_occurred_at(event: UsageEvent, at: float) -> UsageEvent:
         event_id=event.event_id, kind=event.kind, quantity=event.quantity,
         consumer_key=event.consumer_key, lease_ref=event.lease_ref,
         node_ref=event.node_ref, task_ref=event.task_ref,
-        tenant_id=event.tenant_id, occurred_at=at, meta=event.meta)
+        tenant_id=event.tenant_id, occurred_at=at, meta=event.meta,
+        customer_id=event.customer_id, project_id=event.project_id,
+        settlement_class=event.settlement_class)
 
 
 # ── 租约-Higress consumer 绑定（租约过期即网关断流，§4.4 写死）────────────────
