@@ -32,3 +32,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# 从仓库外整仓收集（如 python -m pytest <repo>/ -q）时，rootdir 配置取本文件，
+# 子包各自 pyproject 的 ini 不再生效——这里集中声明子包 src 路径与 asyncio 模式，
+# 保证 tests/ 与 providers/、tools/ 子包测试在同一会话内可全部收集执行。
+pythonpath = [
+    "src",
+    "providers/e2b_compat/src",
+    "tools/console-tui/src",
+]
+asyncio_mode = "auto"
