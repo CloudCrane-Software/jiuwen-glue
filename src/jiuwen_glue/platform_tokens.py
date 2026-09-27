@@ -280,30 +280,40 @@ class PlatformTokenMinter:
         if not request.decision_ref:
             raise TokenMintError("decision_ref is required (decided_by audit)")  # 防御：构造已挡
 
-        # 2) TTL 帽（TTL≤1h）
-        if not isinstance(request.ttl_seconds, int) or request.ttl_seconds <= 0:
+        # 2) TTL 帽（TTL≤1h；**严格 int**——bool 是 int 子类，isinstance 会把
+        #    True 放行成 1 秒令牌，grok 红队 H4，故用 type() is int）
+        if type(request.ttl_seconds) is not int or request.ttl_seconds <= 0:
             raise TokenMintError(f"ttl_seconds must be a positive int, got {request.ttl_seconds!r}")
         if request.ttl_seconds > TOKEN_TTL_CAP_SECONDS:
             raise TokenMintError(
                 f"ttl_seconds {request.ttl_seconds} exceeds cap {TOKEN_TTL_CAP_SECONDS} (v2.1 §4.5)")
 
-        # 3) scope 非空（目录里显式空 scope 的硬清单类在这里被第二次挡住）
+        # 3) 扩缩权不对称：缩权不进来（OPA 拒），扩权与硬清单从这里出（升级对象）。
+        #    先于快照/scope 检查——硬清单请求无论 scope/快照如何都必须产出升级对象
+        #    留痕（grok 红队 H2b：原先被后续 TokenMintError 抢先，升级零留痕）。
+        self._guard_escalation(request)
+
+        # 4) 五交集快照必须携带（grok 红队 H2：快照缺省 → 扩权检查被静默跳过 →
+        #    scope 收敛无从证明；OPA 中间件本就持有五交集，铸造时随决策引用传入）
+        if not request.five_way_snapshot:
+            raise TokenMintError(
+                "five_way_snapshot is required to mint — scope convergence cannot be "
+                "verified without it (an empty snapshot silently skipped the expansion check)")
+
+        # 5) scope 非空（目录里显式空 scope 的非硬清单类在这里被挡住）
         scopes = tuple(request.scopes)
         if not scopes:
             raise TokenMintError(
                 f"task_class {request.task_class!r} declares no scopes "
                 "(empty-scope catalog entries are escalation-only, never minted)")
 
-        # 4) 禁代签：没有注入签名器就没有 token（不存在本模块自签路径）
+        # 6) 禁代签：没有注入签名器就没有 token（不存在本模块自签路径）
         if self._signer is None:
             raise TokenMintError(
                 "no signer bound — the minter never signs by itself (proxy-signing forbidden); "
                 "bind a platform adapter signer backed by a bao-held key")
 
-        # 5) 扩缩权不对称：缩权不进来（OPA 拒），扩权与硬清单从这里出（升级对象）
-        self._guard_escalation(request)
-
-        # 6) 签名（每次铸造都走签名器——禁缓存）+ 登记留痕
+        # 7) 签名（每次铸造都走签名器——禁缓存）+ 登记留痕
         now = self._now()
         claims = {
             "task_class": request.task_class,
@@ -409,11 +419,16 @@ class PlatformTokenMinter:
         return flipped
 
     def status_of(self, token_ref: str) -> str:
+        """查询状态；ACTIVE 但已过 TTL → **就地翻转 EXPIRED 并留痕**（与 expire_due
+        同一迁移，幂等——grok 红队 H3：原先懒求值不留 EXPIRE 日志，只轮询本方法
+        的消费者会让过期零留痕）。"""
         rec = self._registry.get(token_ref)
         if rec is None:
             raise TokenMintError(f"unknown token_ref {token_ref!r}")
         if rec["status"] == STATUS_ACTIVE and self._now() >= rec["expires_at"]:
-            return STATUS_EXPIRED
+            rec["status"] = STATUS_EXPIRED
+            self._log("EXPIRE", token_ref=token_ref, decided_by=rec["decided_by"],
+                      at=self._now(), expires_at=rec["expires_at"])
         return rec["status"]
 
     def active_at(self, ts: float) -> List[str]:
@@ -463,6 +478,20 @@ class GitHubAppInstallationFlow:
         self.api_base = api_base
         self._now = now or _utcnow
         self.last_jwt_claims: Optional[dict] = None   # 最近一跳的 claims（审计/测试观察点）
+        # 流程内铸造器**常驻本 flow**（grok 红队 H3：原先每次铸造现建局部 minter，
+        # mint_log/登记簿随函数返回即弃——审计断链）。留痕经本 flow 的
+        # mint_log / registered_count 持续可查。
+        self._minter = PlatformTokenMinter(signer=self._signer, now=self._now)
+        self._minter.bind_signer(self._signer, signer_bao_ref=self.private_key_bao_ref)
+
+    @property
+    def mint_log(self) -> Tuple[dict, ...]:
+        """本 flow 全部铸造/升级/过期留痕（常驻，不随单次铸造丢弃）。"""
+        return self._minter.mint_log
+
+    @property
+    def registered_count(self) -> int:
+        return self._minter.registered_count
 
     def installation_jwt_claims(self, *, ttl_seconds: int = GITHUB_JWT_TTL_CAP_SECONDS) -> dict:
         """第一跳 claims：iss=App ID，iat=now，exp=now+min(ttl, 600)。"""
@@ -476,7 +505,8 @@ class GitHubAppInstallationFlow:
 
     def mint_installation_token(self, request: TokenRequest) -> Tuple[MintedToken, dict]:
         """两跳全流程，返回 (铸造结果, 原始响应引用)。TTL 超帽/硬清单/扩权照拒。"""
-        if not isinstance(request.ttl_seconds, int) or request.ttl_seconds <= 0 \
+        # 严格 int（同 H4：bool 是 int 子类）
+        if type(request.ttl_seconds) is not int or request.ttl_seconds <= 0 \
                 or request.ttl_seconds > TOKEN_TTL_CAP_SECONDS:
             raise TokenMintError(
                 f"ttl_seconds must be in (0, {TOKEN_TTL_CAP_SECONDS}]")
@@ -507,9 +537,7 @@ class GitHubAppInstallationFlow:
                 "installation token TTL from platform exceeds 3600s cap — refusing "
                 "(mint a shorter-lived one, never widen)")
 
-        minter = PlatformTokenMinter(signer=self._signer, now=self._now)
-        minter.bind_signer(self._signer, signer_bao_ref=self.private_key_bao_ref)
-        minted = minter.mint(request)                          # 留痕/硬清单/扩权守卫复用
+        minted = self._minter.mint(request)                    # 留痕/硬清单/扩权守卫复用（常驻 minter）
         reference = {"installation_token_ref": f"gh-install:{self.installation_id}",
                      "expires_at": expires_at,
                      "token_plaintext_held_by": "caller_only"}  # 明文永远只在调用方手里

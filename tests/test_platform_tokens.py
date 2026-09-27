@@ -74,8 +74,11 @@ class MockTransport:
 def make_request(clock, *, task_class: str = "ci_fix", platform: str = "github",
                  scopes: tuple = ("github:repo:read", "github:repo:write"),
                  ttl: int = 1800, decision_ref: str = "opa:dec-0001",
-                 task_ref: str = "", snapshot: tuple = (),
+                 task_ref: str = "", snapshot: tuple = None,
                  hard_list: str = None) -> TokenRequest:
+    # snapshot 缺省 = scopes 本身（mint 现要求快照必须携带——grok H2 修复后的默认正例）
+    if snapshot is None:
+        snapshot = tuple(scopes)
     return TokenRequest(
         task_class=task_class, platform=platform, scopes=scopes, ttl_seconds=ttl,
         decision_ref=decision_ref, agent_ref="ag:ci-bot@t0/run:r1/task:t9",
@@ -118,6 +121,28 @@ def test_mint_requires_decision_ref(clock):
     object.__setattr__(naked, "decision_ref", "")        # 绕过构造直改（防御路径）
     with pytest.raises(TokenMintError, match="decision_ref"):
         m.mint(naked)
+
+
+# ── 2b. 红队回归（grok H2/H4）────────────────────────────────────────────────
+
+def test_mint_requires_five_way_snapshot(clock):
+    """快照缺省 → 拒绝（H2：空快照曾静默跳过扩权检查，repo_archive 被无证铸造）。"""
+    m = make_minter(clock)
+    naked = make_request(clock, task_class="repo_archive",
+                         scopes=("github:repo:read",), snapshot=())
+    with pytest.raises(TokenMintError, match="five_way_snapshot is required"):
+        m.mint(naked)
+    assert m.registered_count == 0
+
+
+def test_mint_refuses_bool_ttl(clock):
+    """H4：bool 是 int 子类——isinstance 校验曾把 True 放行成 1 秒令牌。"""
+    m = make_minter(clock)
+    with pytest.raises(TokenMintError, match="positive int"):
+        m.mint(make_request(clock, ttl=True))
+    with pytest.raises(TokenMintError, match="positive int"):
+        m.mint(make_request(clock, ttl=1800.5))          # float 同样拒
+    assert m.registered_count == 0
 
 
 # ── 3. TTL 帽 ≤1h（超帽拒 / 边界 3600 过 / 非正拒）──────────────────────────
@@ -196,6 +221,13 @@ def test_installation_flow_mock_end_to_end(clock):
     assert reference["installation_token_ref"] == "gh-install:7891011"
     assert "ghu_mock-token-plaintext" not in repr(minted)          # 铸造对象无明文
     assert minted.decision_ref == "opa:dec-0001" and minted.signer_bao_ref.startswith("openbao:")
+    # H3b：flow 内 minter 常驻——留痕挂在 flow 上，不随单次铸造丢弃
+    assert len([e for e in flow.mint_log if e["event"] == "MINT"]) == 1
+    assert flow.registered_count == 1
+    minted2, _ = flow.mint_installation_token(make_request(clock, decision_ref="opa:dec-0002"))
+    assert len([e for e in flow.mint_log if e["event"] == "MINT"]) == 2
+    assert flow.registered_count == 2
+    assert minted2.token_ref != minted.token_ref
 
 
 def test_installation_jwt_claims_ttl_cap(clock):
@@ -261,6 +293,18 @@ def test_hard_list_category_escalates_L4_never_mints(clock):
     assert m.registered_count == 0                         # 登记簿空：升级路径绝不铸 token
     escalates = [e for e in m.mint_log if e["event"] == "ESCALATE"]
     assert len(escalates) == len(HARD_LIST_CATEGORIES)
+
+
+def test_hard_list_with_empty_scopes_still_escalates(clock):
+    """H2b：硬清单 + 空 scope 必须先出升级对象（原先被空 scope 的
+    TokenMintError 抢先，ESCALATE 零留痕）。"""
+    m = make_minter(clock)
+    with pytest.raises(HardListEscalationError) as ei:
+        m.mint(make_request(clock, task_class="repo_archive", task_ref="wo-99",
+                            scopes=(), hard_list=HARD_IRREVERSIBLE))
+    assert ei.value.signal["escalation_level"] == ESCALATION_L4
+    assert m.registered_count == 0
+    assert len([e for e in m.mint_log if e["event"] == "ESCALATE"]) == 1
 
 
 def test_hard_list_readiness_ready_when_guardian_fills_pieces(clock):
@@ -331,11 +375,19 @@ def test_revoke_and_expire_with_audit(clock):
     assert m.status_of(t.token_ref) == STATUS_ACTIVE
     assert m.active_at(clock() + 599) == [t.token_ref]
     assert m.active_at(clock() + 601) == []
+    # H3a：仅轮询 status_of（不调 expire_due）也必须翻状态并留 EXPIRE 痕
+    clock.advance(700)
+    assert m.status_of(t.token_ref) == STATUS_EXPIRED
+    expires = [e for e in m.mint_log if e["event"] == "EXPIRE"]
+    assert len(expires) == 1 and expires[0]["decided_by"] == "opa:dec-0001"
+    assert m.status_of(t.token_ref) == STATUS_EXPIRED       # 幂等：不重复留痕
+    assert len([e for e in m.mint_log if e["event"] == "EXPIRE"]) == 1
+    t1b = m.mint(make_request(clock, ttl=600))
     clock.advance(700)
     flipped = m.expire_due()
-    assert flipped == [t.token_ref]
-    assert m.status_of(t.token_ref) == STATUS_EXPIRED
-    assert [e for e in m.mint_log if e["event"] == "EXPIRE"]
+    assert flipped == [t1b.token_ref]
+    assert m.status_of(t1b.token_ref) == STATUS_EXPIRED
+    assert len([e for e in m.mint_log if e["event"] == "EXPIRE"]) == 2
     # 撤销需要决策引用（状态变更留痕 decided_by）
     with pytest.raises(TokenMintError, match="decision_ref"):
         m.revoke(t.token_ref, decision_ref="")
@@ -353,4 +405,5 @@ def test_unknown_token_and_unknown_platform_refused(clock):
     with pytest.raises(TokenMintError, match="unknown platform"):
         make_request(clock, platform="gitlab")
     with pytest.raises(TokenMintError, match="no scopes"):
-        m.mint(make_request(clock, scopes=()))             # 空 scope 永不铸（escalation-only）
+        m.mint(make_request(clock, scopes=(), snapshot=("github:repo:read",)))
+        # 空 scope 永不铸（escalation-only；快照显式给出以过 H2 检查）
