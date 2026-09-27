@@ -23,7 +23,7 @@ dependencies = ["textual>=1.0"]
 
 [project.optional-dependencies]
 pg = ["psycopg[binary]>=3.1"]   # 缺失时 TUI 仍可跑 MOCK 模式
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 jiuwen-console = "console_tui.app:main"
