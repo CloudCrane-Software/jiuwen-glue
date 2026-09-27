@@ -22,8 +22,18 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 
-# 干预人（治理面操作员）。Agent 不得自确认 Challenge（challenge.py 同款纪律）。
+# 干预人（治理面操作员，console: 前缀域）。Agent 不得自确认 Challenge
+# （challenge.py 同款纪律）；操作员只覆盖 user 类 ask（见 CONFIRMER_REALMS），
+# resource_owner / duty_officer 级必须由对应人在独立界面确认。
 OPERATOR = "console:operator"
+
+# who 维度的强制（与 jiuwen_glue.challenge.CONFIRMER_REALMS 同源镜像，tests
+# 交叉校验防漂移）：每类 who_confirms 只允许携带对应身份前缀的裁决人 resolve。
+CONFIRMER_REALMS = {
+    "user": ("user:", "console:"),
+    "resource_owner": ("resource_owner:",),
+    "duty_officer": ("duty_officer:",),
+}
 
 # 干预动作（三级干预对应的审计 kind；p 键在暂停态复用为恢复，不新增键）
 KIND_STEER = "steer"
@@ -90,21 +100,29 @@ def utcnow() -> float:
     return time.time()
 
 
+def confirmer_may_resolve(by: str, who_confirms: str) -> bool:
+    """裁决人身份是否覆盖该 who_confirms 类别（app 预检与状态机共用同一判定，
+    不设第二个决策点）。"""
+    realms = CONFIRMER_REALMS.get(who_confirms)
+    return bool(realms) and isinstance(by, str) and any(by.startswith(p) for p in realms)
+
+
 def resolve_challenge_state(state: str, *, expires_at: float, now: float,
-                            approved: bool, by: str) -> Tuple[str, float, str]:
+                            approved: bool, by: str,
+                            who_confirms: str) -> Tuple[str, float, str]:
     """Challenge 裁决的纯状态机（mock/pg 两后端共用；pg 侧另有 DDL 触发器第二道闸）。
 
     返回 (new_state, resolved_at, resolved_by)。规则（与 002 trg_challenge_guard
     + challenge.py.resolve 逐条对齐）:
 
-    1. 未知裁决人（by 为空）拒绝——Agent 不得自确认；
-    2. 已是终态（approved/denied/expired）拒绝再改；
-    3. pending 且 now >= expires_at → 惰性转 expired 并拒绝裁决（fail-closed：
+    1. 已是终态（approved/denied/expired）拒绝再改；
+    2. pending 且 now >= expires_at → 惰性转 expired 并拒绝裁决（fail-closed：
        过期批准不产生任何效力，缺口必须重新发起 Challenge）；
-    4. pending 且未过期 → approved/denied，resolved_at/resolved_by 必填。
+    3. 未知裁决人（by 为空）拒绝——Agent 不得自确认；
+    4. **who 维度强制**：by 不在 who_confirms 对应的身份前缀域内（CONFIRMER_REALMS）
+       一律拒绝——错域确认与 Agent 代批同样无效；
+    5. pending 且未过期 → approved/denied，resolved_at/resolved_by 必填。
     """
-    if not by or not isinstance(by, str):
-        raise ChallengeResolutionError("resolving a challenge requires an explicit confirmer (by=...)")
     if state not in (CH_PENDING, CH_APPROVED, CH_DENIED, CH_EXPIRED):
         raise ChallengeResolutionError(f"unknown challenge state: {state!r}")
     if state in CH_TERMINAL:
@@ -115,6 +133,13 @@ def resolve_challenge_state(state: str, *, expires_at: float, now: float,
         raise ChallengeResolutionError(
             "challenge expired at deadline; late approval is void (fail-closed) "
             "— re-open a new Challenge instead")
+    if not by or not isinstance(by, str):
+        raise ChallengeResolutionError("resolving a challenge requires an explicit confirmer (by=...)")
+    if not confirmer_may_resolve(by, who_confirms):
+        raise ChallengeResolutionError(
+            f"confirmer {by!r} is not allowed for who_confirms={who_confirms!r} "
+            f"(allowed realms: {CONFIRMER_REALMS.get(who_confirms, ())}); the challenge "
+            "must be confirmed by the corresponding person in an independent interface")
     return (CH_APPROVED if approved else CH_DENIED), now, by
 
 

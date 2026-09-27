@@ -123,8 +123,10 @@ def test_steer_rejects_unknown_agent_and_empty_text(store):
 
 # ── a = 审批 ask 队列（走 Challenge 状态机，不绕过）────────────────────────
 
-def _pending(store):
-    return store.challenges()[0].challenge_id
+def _pending(store, who_confirms="user"):
+    """user 级待审批项（控制台操作员可裁的域）。"""
+    return next(c for c in store.challenges()
+                if c.who_confirms == who_confirms).challenge_id
 
 
 def test_approve_challenge_flow(store):
@@ -142,6 +144,17 @@ def test_deny_challenge_flow(store):
     event = store.resolve_challenge(cid, approved=False)
     assert event.kind == KIND_DENY
     assert store.decisions()[-1].meta["challenge_state"] == "denied"
+
+
+def test_resource_owner_challenge_not_resolvable_by_console(store):
+    """who 维度强制：resource_owner 级 ask 不允许控制台操作员（console: 域）代裁。"""
+    ro_id = _pending(store, who_confirms="resource_owner")
+    with pytest.raises(ChallengeResolutionError, match="not allowed"):
+        store.resolve_challenge(ro_id, approved=True)
+    assert ro_id in {c.challenge_id for c in store.challenges()}        # 拒绝不出队
+    # 对应域的裁决人可以裁
+    event = store.resolve_challenge(ro_id, approved=True, by="resource_owner:alice")
+    assert event.kind == KIND_APPROVE
 
 
 def test_expired_challenge_rejected_fail_closed(store, clock):

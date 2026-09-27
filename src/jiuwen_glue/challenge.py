@@ -34,6 +34,19 @@ CONFIRM_RESOURCE_OWNER = "resource_owner"
 CONFIRM_DUTY_OFFICER = "duty_officer"
 _WHO = (CONFIRM_USER, CONFIRM_RESOURCE_OWNER, CONFIRM_DUTY_OFFICER)
 
+# who 维度的强制（不再纯展示）：每类 who_confirms 只允许携带对应身份前缀的
+# 裁决人 resolve（resolve 的 by= 必须落在下列前缀域内）：
+# - user 类：用户本人（user:*）或治理面控制台操作员（console:*）——ask 审批
+#   队列即控制台 ask（method=console.ask），操作员是人类在控制面的操作身份；
+# - resource_owner / duty_officer：必须由携带对应前缀的身份在独立界面确认，
+#   控制台操作员不得代裁（手册案例：重启生产实例不能被控制台统一裁掉）。
+# console-tui 的 state.py 镜像本表，tests 交叉校验防漂移。
+CONFIRMER_REALMS = {
+    CONFIRM_USER: ("user:", "console:"),
+    CONFIRM_RESOURCE_OWNER: ("resource_owner:",),
+    CONFIRM_DUTY_OFFICER: ("duty_officer:",),
+}
+
 
 def _utcnow() -> float:
     import time
@@ -157,6 +170,8 @@ class ChallengeBoard:
     def resolve(self, challenge_id: str, *, approved: bool, by: str) -> Challenge:
         """裁决（由 who_confirms 对应的人在独立界面完成；Agent 不得代为裁决）。
 
+        - **who 维度强制**：by 必须落在 who_confirms 对应的身份前缀域内
+          （CONFIRMER_REALMS），错域裁决一律拒绝 → ChallengeStateError；
         - 已过期（含惰性过期）的 Challenge 一律拒绝裁决 → ChallengeStateError
           （fail-closed：过期批准不产生任何效力）；
         - 终态不可再改（approved/denied 不回退）。
@@ -171,8 +186,14 @@ class ChallengeBoard:
                 f"challenge {challenge_id} is {ch.state}; only PENDING can be resolved")
         if not by:
             raise ChallengeStateError("resolve requires an explicit confirmer (by=...)")
+        realms = CONFIRMER_REALMS.get(ch.who_confirms, ())
+        if not any(by.startswith(prefix) for prefix in realms):
+            raise ChallengeStateError(
+                f"confirmer {by!r} is not allowed for who_confirms={ch.who_confirms!r} "
+                f"(allowed realms: {realms}); the challenge must be confirmed by the "
+                "corresponding person in an independent interface")
         ch.state = APPROVED if approved else DENIED
         ch.resolved_at = now
         ch.resolved_by = by
-        self._log(ch, "RESOLVE", approved=approved, by=by)
+        self._log(ch, "RESOLVE", approved=approved, by=by, who=ch.who_confirms)
         return ch

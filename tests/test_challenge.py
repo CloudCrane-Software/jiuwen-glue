@@ -10,6 +10,7 @@ from jiuwen_glue import (
     CHALLENGE_PENDING,
     CONFIRM_DUTY_OFFICER,
     CONFIRM_RESOURCE_OWNER,
+    CONFIRM_USER,
     DENIED,
     ChallengeBoard,
     ChallengeStateError,
@@ -57,7 +58,7 @@ def test_model_only_sees_high_level_states_never_auth_code(clock):
     forbidden = {"auth_code", "token", "secret", "credential", "authorization"}
     assert not forbidden & set(vars(ch))                    # 对象字段
     assert not forbidden & set(ch.to_ask_payload())         # ask 载荷
-    board.resolve(ch.challenge_id, approved=True, by="owner-1")
+    board.resolve(ch.challenge_id, approved=True, by="resource_owner:owner-1")
     assert board.state_of(ch.challenge_id) == APPROVED      # 高层状态
     assert not forbidden & set(board.get(ch.challenge_id).to_ask_payload())
 
@@ -65,16 +66,16 @@ def test_model_only_sees_high_level_states_never_auth_code(clock):
 def test_approve_and_deny_lifecycle(clock):
     board = ChallengeBoard(now=clock)
     a = _open(board)
-    board.resolve(a.challenge_id, approved=True, by="owner-1")
+    board.resolve(a.challenge_id, approved=True, by="resource_owner:owner-1")
     assert board.state_of(a.challenge_id) == APPROVED
-    assert board.get(a.challenge_id).resolved_by == "owner-1"
+    assert board.get(a.challenge_id).resolved_by == "resource_owner:owner-1"
 
     d = _open(board)
-    board.resolve(d.challenge_id, approved=False, by="owner-1")
+    board.resolve(d.challenge_id, approved=False, by="resource_owner:owner-1")
     assert board.state_of(d.challenge_id) == DENIED
     # 终态不可再裁决
     with pytest.raises(ChallengeStateError):
-        board.resolve(a.challenge_id, approved=False, by="owner-2")
+        board.resolve(a.challenge_id, approved=False, by="resource_owner:owner-2")
 
 
 def test_expiry_is_fail_closed(clock):
@@ -84,11 +85,11 @@ def test_expiry_is_fail_closed(clock):
     clock.advance(61)
     assert board.state_of(ch.challenge_id) == CHALLENGE_EXPIRED      # 惰性过期
     with pytest.raises(ChallengeStateError):
-        board.resolve(ch.challenge_id, approved=True, by="owner-1")
+        board.resolve(ch.challenge_id, approved=True, by="resource_owner:owner-1")
     assert board.state_of(ch.challenge_id) == CHALLENGE_EXPIRED      # 批准不产生效力
     # 重新发起一条才能继续
     ch2 = _open(board, ttl_seconds=600)
-    board.resolve(ch2.challenge_id, approved=True, by="owner-1")
+    board.resolve(ch2.challenge_id, approved=True, by="resource_owner:owner-1")
     assert board.state_of(ch2.challenge_id) == APPROVED
 
 
@@ -96,7 +97,7 @@ def test_approval_right_before_expiry_ok(clock):
     board = ChallengeBoard(now=clock)
     ch = _open(board, ttl_seconds=60)
     clock.advance(59)
-    board.resolve(ch.challenge_id, approved=True, by="owner-1")
+    board.resolve(ch.challenge_id, approved=True, by="resource_owner:owner-1")
     clock.advance(1000)
     assert board.state_of(ch.challenge_id) == APPROVED   # 已决状态不再过期
 
@@ -123,3 +124,39 @@ def test_open_validation(clock):
         _open(board, resource="")
     with pytest.raises(UnknownChallengeError):
         board.state_of("nope")
+
+
+def test_wrong_confirmer_realm_rejected(clock):
+    """who 维度强制：错域裁决人一律拒绝（by 必须落在 who_confirms 的前缀域内）；
+    拒绝后 Challenge 保持 pending，且不留 RESOLVE 审计痕。"""
+    board = ChallengeBoard(now=clock)
+    u = _open(board, who_confirms=CONFIRM_USER)
+    with pytest.raises(ChallengeStateError, match="not allowed"):
+        board.resolve(u.challenge_id, approved=True, by="resource_owner:alice")
+    assert board.state_of(u.challenge_id) == CHALLENGE_PENDING
+    # 手册案例：资源级/值班级操作不能由控制台操作员代裁
+    ro = _open(board, who_confirms=CONFIRM_RESOURCE_OWNER)
+    with pytest.raises(ChallengeStateError, match="not allowed"):
+        board.resolve(ro.challenge_id, approved=True, by="console:operator")
+    duty = _open(board, who_confirms=CONFIRM_DUTY_OFFICER)
+    with pytest.raises(ChallengeStateError, match="not allowed"):
+        board.resolve(duty.challenge_id, approved=True, by="console:operator")
+    # 无前缀的裸身份同样拒绝
+    with pytest.raises(ChallengeStateError, match="not allowed"):
+        board.resolve(u.challenge_id, approved=True, by="alice")
+    assert [e for e in board.audit if e["event"] == "RESOLVE"] == []
+
+
+def test_confirmer_realms_allow_matching_prefix_and_audit_who(clock):
+    """各域裁决人按前缀域放行；RESOLVE 审计记录 who 维度（不再纯展示）。"""
+    board = ChallengeBoard(now=clock)
+    u = _open(board, who_confirms=CONFIRM_USER)
+    board.resolve(u.challenge_id, approved=True, by="console:operator")
+    ro = _open(board, who_confirms=CONFIRM_RESOURCE_OWNER)
+    board.resolve(ro.challenge_id, approved=False, by="resource_owner:alice")
+    duty = _open(board, who_confirms=CONFIRM_DUTY_OFFICER)
+    board.resolve(duty.challenge_id, approved=True, by="duty_officer:bob")
+    resolves = [e for e in board.audit if e["event"] == "RESOLVE"]
+    assert [e["who"] for e in resolves] == \
+        [CONFIRM_USER, CONFIRM_RESOURCE_OWNER, CONFIRM_DUTY_OFFICER]
+    assert board.get(u.challenge_id).resolved_by == "console:operator"

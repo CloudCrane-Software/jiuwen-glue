@@ -34,7 +34,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedCont
 from .data import (USAGE_KIND_LABELS, ChallengeRow, ConsoleStore,
                    MockConsoleStore, TaskRow, connect_pg, format_quantity)
 from .adjudication import AdjudicationCardScreen
-from .state import OPERATOR
+from .state import OPERATOR, confirmer_may_resolve
 
 PANE_TASKS = "pane-tasks"
 PANE_LEASES = "pane-leases"
@@ -311,6 +311,13 @@ class ConsoleApp(App):
         ch = self._selected_challenge()
         if ch is None:
             self.notify("ask 审批队列无选中项", severity="warning")
+            return
+        if not confirmer_may_resolve(OPERATOR, ch.who_confirms):
+            # who 维度强制：控制台操作员只覆盖 user 级 ask；resource_owner /
+            # duty_officer 级必须由对应人在独立界面确认（challenge.py 同款纪律）。
+            self.notify(
+                f"裁决被拒绝: 该 Challenge 需 {ch.who_confirms} 在独立界面确认"
+                "（console 操作员不可代裁）", severity="error")
             return
         summary = (f"{ch.agent_identity_ref} 想对 {ch.resource} 执行 {ch.action}"
                    f"（确认人: {ch.who_confirms}，剩余 {ch.seconds_left(self.store_now()):.0f}s）")

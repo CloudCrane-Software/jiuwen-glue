@@ -219,9 +219,9 @@ def test_ask_emits_challenge_and_gate_stays_unknown(clock):
     assert payload["agent"] == run.spec.agent_identity_ref
     assert payload["resource"] == "batch:cfg-20260926-01"
     assert payload["action"] == "release.resume"
-    # 确认人批准后以 PASS 重新提交 → 门控放行
+    # 确认人批准后以 PASS 重新提交 → 门控放行（by 须落在 who_confirms=user 的前缀域）
     ch = pending[0]
-    board.resolve(ch.challenge_id, approved=True, by="user-88")
+    board.resolve(ch.challenge_id, approved=True, by="user:88")
     store.submit_check(run.run_id, "perm-rail", OUTCOME_PASS,
                        evidence_ref=f"challenge:{ch.challenge_id}")
     store.submit_check(run.run_id, "static-scan", OUTCOME_PASS)

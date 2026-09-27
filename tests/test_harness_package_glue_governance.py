@@ -213,7 +213,7 @@ def test_ask_flow_closes_after_human_approval(guardrail_tool, challenge_tool):
     assert any(c["challenge_id"] == challenge_id for c in queue["pending"])
 
     resolved = _run(challenge_tool, op="resolve", challenge_id=challenge_id,
-                    approved=True, by="owner-alice")
+                    approved=True, by="resource_owner:alice")
     assert resolved["state"] == "approved"
 
     resub = _run(guardrail_tool, op="submit_check", run_id=run_id,
@@ -231,7 +231,7 @@ def test_denied_challenge_keeps_gate_closed(guardrail_tool, challenge_tool):
     sub = _run(guardrail_tool, op="submit_check", run_id=run_id,
                check_id="perm", outcome="ASK")
     res = _run(challenge_tool, op="resolve", challenge_id=sub["challenge_id"],
-               approved=False, by="owner-bob")
+               approved=False, by="resource_owner:bob")
     assert res["state"] == "denied"
     # 拒绝后不重新提交 → 必填 check 无 PASS 结论 → gate 不放行
     _run(guardrail_tool, op="finalize", run_id=run_id, seal_ref="seal://t6/008")

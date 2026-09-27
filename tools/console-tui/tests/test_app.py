@@ -82,10 +82,18 @@ async def test_pause_key_toggles_selected_task(pilot):
     assert kinds == [KIND_PAUSE, KIND_RESUME]
 
 
+def _select_challenge_row(app, who_confirms: str) -> str:
+    """把 ask 队列光标移到指定 who_confirms 的行，返回其 challenge_id。"""
+    rows = app._challenge_rows
+    idx = next(i for i, c in enumerate(rows) if c.who_confirms == who_confirms)
+    app.query_one("#challenges", DataTable).move_cursor(row=idx)
+    return rows[idx].challenge_id
+
+
 async def test_approve_flow_via_modal_and_y_key(pilot):
     app = pilot.app
-    target = app.store.challenges()[0].challenge_id
-    await pilot.press("a")                              # 弹 ResolveModal（默认选中首行）
+    target = _select_challenge_row(app, "user")         # user 级：控制台操作员可裁
+    await pilot.press("a")                              # 弹 ResolveModal
     assert isinstance(app.screen, ResolveModal)
     await pilot.press("y")                              # approve 走 Challenge 状态机
     await pilot.pause()
@@ -95,10 +103,26 @@ async def test_approve_flow_via_modal_and_y_key(pilot):
 
 async def test_deny_via_n_key(pilot):
     app = pilot.app
+    _select_challenge_row(app, "user")
     await pilot.press("a")
     await pilot.press("n")
     await pilot.pause()
     assert app.store.audit_trail()[-1].kind == KIND_DENY
+
+
+async def test_approve_refuses_non_user_challenge(pilot):
+    """who 维度强制：resource_owner/duty_officer 级 ask 控制台不可代裁——
+    按 a 不弹裁决窗、不留 approve 痕（须由对应人在独立界面确认）。"""
+    app = pilot.app
+    for who in ("resource_owner", "duty_officer"):
+        row = next((c for c in app._challenge_rows if c.who_confirms == who), None)
+        if row is None:                                 # mock 种子仅含 user/resource_owner
+            continue
+        _select_challenge_row(app, who)
+        await pilot.press("a")
+        await pilot.pause()
+        assert not isinstance(app.screen, ResolveModal)
+    assert all(a.kind != KIND_APPROVE for a in app.store.audit_trail())
 
 
 async def test_approve_unknown_challenge_is_safe(pilot):

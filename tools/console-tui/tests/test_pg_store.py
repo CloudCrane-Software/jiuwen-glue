@@ -62,8 +62,8 @@ def _task_row(owner="alpha-planner-01", ts=None):
             dt, dt, False)
 
 
-def _challenge_state_row(state="pending", expires_in=600.0):
-    return (state, datetime.datetime.fromtimestamp(time.time() + expires_in))
+def _challenge_state_row(state="pending", expires_in=600.0, who_confirms="user"):
+    return (state, datetime.datetime.fromtimestamp(time.time() + expires_in), who_confirms)
 
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -185,6 +185,16 @@ def test_pg_expired_challenge_rejected_without_update():
 def test_pg_unknown_challenge_rejected():
     with pytest.raises(UnknownTargetError):
         PgConsoleStore(StubConn()).resolve_challenge(str(uuid.uuid4()), approved=True)
+
+
+def test_pg_approve_wrong_confirmer_realm_rejected_without_update():
+    """who 维度强制：resource_owner 级 challenge 不允许 console 操作员（默认裁决人）
+    代裁——状态机先拒，不发 UPDATE（与 mock 同语义）。"""
+    cid = str(uuid.uuid4())
+    conn = StubConn(queue=[([_challenge_state_row(who_confirms="resource_owner")], 0)])
+    with pytest.raises(ChallengeResolutionError, match="not allowed"):
+        PgConsoleStore(conn).resolve_challenge(cid, approved=True)
+    assert len(conn.log) == 1 and "UPDATE" not in conn.log[0][0]
 
 
 # ── p = 暂停/恢复 ───────────────────────────────────────────────────────────

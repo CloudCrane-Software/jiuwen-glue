@@ -42,36 +42,64 @@ def test_canonical_hash_matches_glue_implementation():
 
 def test_resolve_pending_to_approved():
     state, at, by = resolve_challenge_state(
-        CH_PENDING, expires_at=100.0, now=50.0, approved=True, by=OPERATOR)
+        CH_PENDING, expires_at=100.0, now=50.0, approved=True, by=OPERATOR,
+        who_confirms="user")
     assert (state, at, by) == (CH_APPROVED, 50.0, OPERATOR)
 
 
 def test_resolve_pending_to_denied():
     state, _, _ = resolve_challenge_state(
-        CH_PENDING, expires_at=100.0, now=99.999, approved=False, by="duty_officer")
+        CH_PENDING, expires_at=100.0, now=99.999, approved=False,
+        by="duty_officer:zhang", who_confirms="duty_officer")
     assert state == CH_DENIED
 
 
 def test_resolve_expired_rejected_fail_closed():
     with pytest.raises(ChallengeResolutionError, match="expired"):
         resolve_challenge_state(CH_PENDING, expires_at=100.0, now=100.0,
-                                approved=True, by=OPERATOR)
+                                approved=True, by=OPERATOR, who_confirms="user")
     # 临界之前任意接近也必须在 now >= expires_at 才拒绝
     resolve_challenge_state(CH_PENDING, expires_at=100.0, now=99.9999,
-                            approved=True, by=OPERATOR)
+                            approved=True, by=OPERATOR, who_confirms="user")
 
 
 def test_resolve_terminal_state_rejected():
     for terminal in (CH_APPROVED, CH_DENIED, CH_EXPIRED):
         with pytest.raises(ChallengeResolutionError, match="terminal"):
             resolve_challenge_state(terminal, expires_at=100.0, now=50.0,
-                                    approved=True, by=OPERATOR)
+                                    approved=True, by=OPERATOR, who_confirms="user")
 
 
 def test_resolve_requires_explicit_confirmer():
     with pytest.raises(ChallengeResolutionError, match="confirmer"):
         resolve_challenge_state(CH_PENDING, expires_at=100.0, now=50.0,
-                                approved=True, by="")
+                                approved=True, by="", who_confirms="user")
+
+
+def test_resolve_wrong_confirmer_realm_rejected():
+    """who 维度强制：错域裁决人拒绝（控制台操作员只覆盖 user 级 ask）。"""
+    with pytest.raises(ChallengeResolutionError, match="not allowed"):
+        resolve_challenge_state(CH_PENDING, expires_at=100.0, now=50.0,
+                                approved=True, by=OPERATOR,
+                                who_confirms="resource_owner")
+    with pytest.raises(ChallengeResolutionError, match="not allowed"):
+        resolve_challenge_state(CH_PENDING, expires_at=100.0, now=50.0,
+                                approved=True, by=OPERATOR,
+                                who_confirms="duty_officer")
+    # 裸身份（无前缀域）同样拒绝
+    with pytest.raises(ChallengeResolutionError, match="not allowed"):
+        resolve_challenge_state(CH_PENDING, expires_at=100.0, now=50.0,
+                                approved=True, by="zhang", who_confirms="user")
+
+
+def test_confirmer_realms_match_glue_policy():
+    """交叉校验防漂移：CONFIRMER_REALMS 与 jiuwen_glue.challenge 同表。"""
+    try:
+        from jiuwen_glue.challenge import CONFIRMER_REALMS as glue_realms
+    except ImportError:                              # pragma: no cover
+        pytest.skip("jiuwen_glue not importable")
+    from console_tui.state import CONFIRMER_REALMS as tui_realms
+    assert tui_realms == glue_realms
 
 
 def test_challenge_semantics_align_with_glue_board():
@@ -86,11 +114,11 @@ def test_challenge_semantics_align_with_glue_board():
     ch = board.open(who_confirms="user", resource="r", action="a",
                     method="console.ask", ttl_seconds=10.0)
     t[0] = 11.0                                       # 时钟越过 expires_at
-    with pytest.raises(ChallengeStateError):         # glue：过期批准无效
+    with pytest.raises(ChallengeStateError):         # glue：过期批准无效（过期先于域校验）
         board.resolve(ch.challenge_id, approved=True, by="user")
     with pytest.raises(ChallengeResolutionError):    # console-tui：同拒
         resolve_challenge_state(CH_PENDING, expires_at=10.0, now=11.0,
-                                approved=True, by="user")
+                                approved=True, by="user", who_confirms="user")
 
 
 # ── p 暂停/恢复二态 ─────────────────────────────────────────────────────────
