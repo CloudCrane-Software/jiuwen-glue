@@ -16,6 +16,10 @@
 
 其余键：r=刷新；q=退出。每次 s/a/p 都产生一条可审计事件（pg: decision_record
 + challenge 状态转移；mock: 内存审计表），经 ``L`` 键可在决策面板复核。
+
+裁决卡（W-06，v2.1 §4.7 升级体系）：``open_adjudication(card_id)`` 打开人类就绪包
+四件套裁决卡，y=approve（递呈人类，包必须 READY）/ e=escalate（打回 L3）两键
+经数据层状态机留痕——不占用全局键位，三级干预 s/a/p 写死不变。
 """
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedCont
 
 from .data import (USAGE_KIND_LABELS, ChallengeRow, ConsoleStore,
                    MockConsoleStore, TaskRow, connect_pg, format_quantity)
+from .adjudication import AdjudicationCardScreen
 from .state import OPERATOR
 
 PANE_TASKS = "pane-tasks"
@@ -124,9 +129,11 @@ class ConsoleApp(App):
     .agent-task { color: $text; }
     .agent-heart { color: $text-muted; }
     DataTable { height: 100%; }
-    #steer-dialog, #resolve-dialog {
+    #steer-dialog, #resolve-dialog, #adjudication-card {
         width: 60%; height: auto; border: thick $accent; background: $surface;
         padding: 1 2; }
+    #adjudication-card { max-height: 80%; }
+    .adjudication-line { padding: 0 1; }
     #resolve-summary { margin: 1 0; }
     """
     BINDINGS = [
@@ -299,6 +306,28 @@ class ConsoleApp(App):
             event = self.store.resolve_challenge(challenge_id, approved, by=OPERATOR)
             self.notify(f"{event.kind} 已留痕: {event.target}")
         except Exception as exc:
+            self.notify(f"裁决被拒绝: {exc}", severity="error")
+        self.action_refresh()
+
+    # ── 裁决卡（W-06，v2.1 §4.7）：四件套展示 + approve/escalate 两键 ────────
+    # 不新增全局干预键（三级干预 s/a/p 写死不变）；卡片经本方法打开
+    # （裁决队列的入口接线 [待 W-11/W-12]），两键裁决走数据层状态机留痕。
+    def open_adjudication(self, card_id: str) -> None:
+        """打开指定就绪包裁决卡（测试与后续裁决队列共用的入口）。"""
+        cards = {c.card_id: c for c in self.store.adjudication_cards()}
+        card = cards.get(card_id)
+        if card is None:
+            self.notify(f"裁决卡不在队列: {card_id}", severity="warning")
+            return
+        self.push_screen(AdjudicationCardScreen(card))
+
+    def action_adjudication_submit(self, card_id: str, approved: bool) -> None:
+        """裁决卡 y/e 两键落库（AdjudicationCardScreen 提交；测试可直接调用）。"""
+        try:
+            event = self.store.resolve_adjudication(card_id, approved, by=OPERATOR)
+            label = "已批准递呈人类" if approved else "已打回 L3"
+            self.notify(f"{event.kind} 已留痕: {event.target}（{label}）")
+        except Exception as exc:   # fail-closed 拒绝也要可见（包不齐 approve 被拒等）
             self.notify(f"裁决被拒绝: {exc}", severity="error")
         self.action_refresh()
 

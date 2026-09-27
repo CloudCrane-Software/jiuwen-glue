@@ -16,6 +16,7 @@
 - 消融验证（WO-0007 件 1：准入前 A/B 对照，原生没有对照实验）            → :mod:`jiuwen_glue.ablation`
 - 准入记录（WO-0007 件 2：消融+GuardrailRun 硬规则，绑定 Spec 版本）     → :mod:`jiuwen_glue.admission`
 - usage_events 计量四维度 + 租约-Higress consumer 绑定（断流求值）       → :mod:`jiuwen_glue.usage`
+- 升级阶梯状态机 L0-L5 + 人类就绪包四件套（v2.1 §4.7）                  → :mod:`jiuwen_glue.escalation`
 
 边界（写死）: 原生层管"怎么做"，glue 管"准不准进"，控制台管"看得见"；
 发现与编排一律用原生 Symphony，本包不自建发现机制；
@@ -82,6 +83,47 @@ from .decision import (
     make_score_hook,
 )
 from .decisions import DecisionLog, DecisionRecord, context_hash
+from .escalation import (
+    HARD_IRREVERSIBLE,
+    HARD_LEGAL_TOS,
+    HARD_LIST,
+    HARD_MONEY,
+    HARD_THEORY_APPROVAL,
+    LEVELS,
+    LEVEL_CAPABILITIES,
+    LEVEL_L0,
+    LEVEL_L1,
+    LEVEL_L2,
+    LEVEL_L3,
+    LEVEL_L4,
+    LEVEL_L5,
+    LEVEL_ROLE,
+    PIECE_CATEGORY,
+    PIECE_FACTS,
+    PIECE_KEYS,
+    PIECE_NO_SOLUTION,
+    PIECE_REVERSIBILITY,
+    PROOF_LEVELS,
+    SCOPE as ESCALATION_SCOPE,
+    Escalation,
+    EscalationCase,
+    EscalationEvent,
+    EscalationLedger,
+    EscalationRequiredError,
+    EscalationSchemaError,
+    EscalationStateError,
+    EscalationStormError,
+    FrozenFact,
+    PermissionExpansionProposal,
+    ReadinessPackage,
+    ReadinessPiece,
+    ReadinessTask,
+    ReversibilityAssessment,
+    StormGuard,
+    UnknownEscalationCaseError,
+    render_readiness,
+    signature_for,
+)
 from .errors import (
     AdmissionDeniedError,
     ArtifactRouteUndeclaredError,
@@ -322,5 +364,18 @@ __all__ = [
     "SIGNAL_DIFF_CONSENSUS", "SIGNAL_BUDGET", "MAX_CANDIDATES",
     "SelectionCandidate", "SelectionResult", "SelectionError", "SelectionRejectedError",
     "selection_score", "select_winner",
+    # escalation（升级阶梯 + 人类就绪包，v2.1 §4.7 / 工单 W-06）
+    "ESCALATION_SCOPE", "LEVELS", "LEVEL_ROLE", "LEVEL_CAPABILITIES",
+    "LEVEL_L0", "LEVEL_L1", "LEVEL_L2", "LEVEL_L3", "LEVEL_L4", "LEVEL_L5",
+    "PROOF_LEVELS", "HARD_LIST", "HARD_MONEY", "HARD_LEGAL_TOS",
+    "HARD_IRREVERSIBLE", "HARD_THEORY_APPROVAL",
+    "StormGuard", "Escalation", "EscalationCase", "EscalationEvent",
+    "EscalationLedger", "PermissionExpansionProposal",
+    "ReadinessTask", "FrozenFact", "ReversibilityAssessment",
+    "ReadinessPackage", "ReadinessPiece", "PIECE_KEYS",
+    "PIECE_FACTS", "PIECE_CATEGORY", "PIECE_NO_SOLUTION", "PIECE_REVERSIBILITY",
+    "render_readiness", "signature_for",
+    "EscalationSchemaError", "EscalationStateError", "EscalationStormError",
+    "EscalationRequiredError", "UnknownEscalationCaseError",
     "__version__",
 ]

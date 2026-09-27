@@ -31,7 +31,11 @@ KIND_APPROVE = "approve"
 KIND_DENY = "deny"
 KIND_PAUSE = "pause"
 KIND_RESUME = "resume"
-AUDIT_KINDS = (KIND_STEER, KIND_APPROVE, KIND_DENY, KIND_PAUSE, KIND_RESUME)
+# 裁决卡（W-06，v2.1 §4.7）的第二键：escalate = 就绪包打回 L3（非 s/a/p 干预，
+# 属升级阶梯裁决面；卡片两键 approve/escalate 的留痕 kind）
+KIND_ESCALATE_BACK = "escalate_back"
+AUDIT_KINDS = (KIND_STEER, KIND_APPROVE, KIND_DENY, KIND_PAUSE, KIND_RESUME,
+               KIND_ESCALATE_BACK)
 
 # Challenge 状态（与 002 glue.challenge CHECK 约束一致）
 CH_PENDING = "pending"
@@ -39,6 +43,12 @@ CH_APPROVED = "approved"
 CH_DENIED = "denied"
 CH_EXPIRED = "expired"
 CH_TERMINAL = (CH_APPROVED, CH_DENIED, CH_EXPIRED)
+
+# 就绪包裁决卡状态（W-06，v2.1 §4.7；escalate 键 = 打回 L3）
+CARD_PENDING = "pending"
+CARD_APPROVED = "approved"        # approve 键：批准递呈人类（L5）
+CARD_RETURNED = "returned_l3"     # escalate 键：打回 L3
+CARD_TERMINAL = (CARD_APPROVED, CARD_RETURNED)
 
 
 # ── 错误（与 glue errors.py 的层级同风格，独立定义避免运行时依赖 jiuwen_glue）──
@@ -57,6 +67,10 @@ class IllegalTransitionError(GovernanceError):
 
 class ChallengeResolutionError(GovernanceError):
     """Challenge 裁决被拒（未知 / 已过期 fail-closed / 已是终态）。"""
+
+
+class AdjudicationResolutionError(GovernanceError):
+    """就绪包裁决卡被拒（未知卡 / 已是终态 / 包非 READY 却要 approve——fail-closed）。"""
 
 
 # ── 纯函数 ───────────────────────────────────────────────────────────────────
@@ -121,6 +135,34 @@ def apply_pause(current: bool, target: str) -> str:
             raise IllegalTransitionError("task is not paused; nothing to resume")
         return KIND_RESUME
     raise IllegalTransitionError(f"pause target must be 'pause' or 'resume', got {target!r}")
+
+
+def resolve_adjudication_state(state: str, *, ready: bool, approved: bool,
+                               by: str) -> Tuple[str, str]:
+    """就绪包裁决卡的纯状态机（W-06，v2.1 §4.7；mock/pg 两后端共用）。
+
+    返回 (new_state, resolved_by)。规则（与 glue.escalation 就绪包闸逐条对齐）:
+
+    1. 未知裁决人（by 为空）拒绝——Agent 不得自确认（challenge 同款纪律）；
+    2. 已是终态（approved / returned_l3）拒绝再改；
+    3. **approve 键 fail-closed**：包非 READY（四件套任一 BLOCKED / 范畴不在
+       四类硬清单）时批准被拒——要么先补齐就绪包，要么用 escalate 键打回 L3；
+    4. escalate 键（打回 L3）对 pending 卡一律放行（打回本身就是安全方向）。
+    """
+    if not by or not isinstance(by, str):
+        raise AdjudicationResolutionError(
+            "resolving a readiness card requires an explicit adjudicator (by=...)")
+    if state not in (CARD_PENDING,) + CARD_TERMINAL:
+        raise AdjudicationResolutionError(f"unknown readiness card state: {state!r}")
+    if state in CARD_TERMINAL:
+        raise AdjudicationResolutionError(
+            f"readiness card is {state} (terminal); only PENDING can be resolved")
+    if approved and not ready:
+        raise AdjudicationResolutionError(
+            "readiness package is not READY; approving a human handoff is rejected "
+            "(fail-closed) — complete the four pieces or knock it back to L3 with "
+            "the escalate key")
+    return (CARD_APPROVED if approved else CARD_RETURNED), by
 
 
 def audit_event(kind: str, *, target: str, by: str = OPERATOR,
