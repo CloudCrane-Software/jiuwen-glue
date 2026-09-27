@@ -323,7 +323,9 @@ def test_decision_requires_rationale(decision_tool):
 # ---------------------------------------------------------------------------
 
 def test_harness_config_declares_the_three_tools():
-    import yaml
+    # pyyaml 仅本测试解析用（运行时零依赖不变）；CI 裸 pytest 环境无 pyyaml 时
+    # 跳过而非失败（W-05 修复：anolis-23 环节5 自 glue main 6f4674c 起红）。
+    yaml = pytest.importorskip("yaml")
 
     cfg = yaml.safe_load(
         (REPO_ROOT / "runtime_extensions" / "glue-governance"
