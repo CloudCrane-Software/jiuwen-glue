@@ -79,14 +79,15 @@ def test_pg_reads_go_through_views_with_params():
     store.challenges()
     store.decisions(limit=5)
     store.nodes()
+    store.usage()
     views = ["glue.v_task_board", "glue.v_active_lease", "glue.v_pending_challenge",
-             "glue.v_recent_decision", "glue.v_node_utilization"]
-    assert len(conn.log) == 5
+             "glue.v_recent_decision", "glue.v_node_utilization", "glue.v_usage"]
+    assert len(conn.log) == 6
     for (sql, params), view in zip(conn.log, views):
         assert view in sql, f"{sql} 未走视图 {view}"
         assert "%s" in sql, f"{sql} 未参数化"
         assert params in (("t0",), ("t0", 5)), f"{sql} 参数异常: {params}"
-    assert conn.commits == 5
+    assert conn.commits == 6
 
 
 def test_pg_task_row_mapping():
@@ -94,6 +95,30 @@ def test_pg_task_row_mapping():
     tasks = PgConsoleStore(conn).tasks()
     assert tasks[0].task_id == "tsk-1" and tasks[0].owner == "alpha-planner-01"
     assert tasks[0].paused is False
+
+
+# ── 计量面板（W-04）：走 glue.v_usage，参数化 + 行映射 ───────────────────────
+
+def test_pg_usage_reads_v_usage_parameterized():
+    conn = StubConn()
+    rows = PgConsoleStore(conn).usage()
+    assert rows == []
+    sql, params = conn.log[0]
+    assert "FROM glue.v_usage" in sql
+    assert "%s" in sql and params == ("t0",)      # tenant 走参数，零拼接
+
+
+def test_pg_usage_row_mapping_handles_null_timestamps():
+    ts = datetime.datetime.fromtimestamp(time.time())
+    conn = StubConn(queue=[([
+        ("llm_relay", 3, 1500.0, ts, ts),
+        ("storage_bytes", 1, 2048.0, None, None),
+    ], 0)])
+    rows = PgConsoleStore(conn).usage()
+    assert rows[0].kind == "llm_relay" and rows[0].events == 3
+    assert rows[0].total_quantity == 1500.0 and rows[0].first_at is not None
+    assert rows[1].kind == "storage_bytes"
+    assert rows[1].first_at is None and rows[1].last_at is None
 
 
 # ── s = steer：INSERT decision_record（type=steer 记在 meta）────────────────

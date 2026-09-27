@@ -1,8 +1,8 @@
 # coding: utf-8
-"""console-tui 治理面作战室（WO-0012 / PROP-0005，PROP-0001 v1.7 §12.3）.
+"""console-tui 治理面作战室（WO-0012 / PROP-0005，PROP-0001 v1.7 §12.3；W-04 计量面板）.
 
-塔式多列布局（借 tower 模式显示形态）+ 顶部节点池状态栏 + 五个数据面板
-（工单看板/租约/ask 审批队列/决策记录/节点利用率）+ 三级干预快捷键。
+塔式多列布局（借 tower 模式显示形态）+ 顶部节点池状态栏 + 六个数据面板
+（工单看板/租约/ask 审批队列/决策记录/节点利用率/计量 usage）+ 三级干预快捷键。
 
 **分层边界（写死）**：执行面 = jiuwenswarm 自带 TUI（人机交互/对话/任务执行）；
 本工具 = 治理面，只读 glue 数据 + 受控三级干预（s/a/p），不替代执行面交互，
@@ -27,7 +27,8 @@ from textual.containers import HorizontalScroll, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
 
-from .data import ChallengeRow, ConsoleStore, MockConsoleStore, TaskRow, connect_pg
+from .data import (USAGE_KIND_LABELS, ChallengeRow, ConsoleStore,
+                   MockConsoleStore, TaskRow, connect_pg, format_quantity)
 from .state import OPERATOR
 
 PANE_TASKS = "pane-tasks"
@@ -35,8 +36,17 @@ PANE_LEASES = "pane-leases"
 PANE_CHALLENGES = "pane-challenges"
 PANE_DECISIONS = "pane-decisions"
 PANE_NODES = "pane-nodes"
+PANE_USAGE = "pane-usage"
 
 _HEARTBEAT_WARN = 900.0     # 心跳超过 15 分钟视为可疑（展示层提示，不做决策）
+
+
+def _fmt_ts(ts: Optional[float]) -> str:
+    """epoch → 本地 HH:MM 展示（仅展示层；None = 该维度暂无事件）。"""
+    if ts is None:
+        return "-"
+    import time as _time
+    return _time.strftime("%H:%M", _time.localtime(ts))
 
 
 class SteerModal(ModalScreen[None]):
@@ -149,6 +159,7 @@ class ConsoleApp(App):
             yield TabPane("ask 审批队列", DataTable(id="challenges"), id=PANE_CHALLENGES)
             yield TabPane("决策记录", DataTable(id="decisions"), id=PANE_DECISIONS)
             yield TabPane("节点利用率", DataTable(id="nodes"), id=PANE_NODES)
+            yield TabPane("计量", DataTable(id="usage"), id=PANE_USAGE)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -162,6 +173,8 @@ class ConsoleApp(App):
         dec.add_columns("决策", "决策者", "选择", "上下文哈希", "留痕")
         nodes = self.query_one("#nodes", DataTable)
         nodes.add_columns("节点", "CPU份额", "GPU份额", "信任", "并行", "在线窗口")
+        usage = self.query_one("#usage", DataTable)
+        usage.add_columns("维度", "事件数", "总量", "最早", "最近")
         for dt in self.query(DataTable):
             dt.cursor_type = "row"
         self.action_refresh()
@@ -180,6 +193,7 @@ class ConsoleApp(App):
         self._refresh_challenges()
         self._refresh_decisions()
         self._refresh_nodes()
+        self._refresh_usage()
 
     def _refresh_tower(self) -> None:
         slots = self.query_one("#tower-slots", Vertical)
@@ -234,6 +248,15 @@ class ConsoleApp(App):
             table.add_row(n.node_id, f"{n.cpu_frac:.2f}", f"{n.gpu_frac:.2f}",
                           n.trust_level, str(n.max_parallel), n.online_window,
                           key=n.node_id)
+
+    def _refresh_usage(self) -> None:
+        """计量面板（W-04，v2.0 §4.4 四维度聚合；展示格式化两模式同一条路径）。"""
+        table = self.query_one("#usage", DataTable)
+        table.clear()
+        for u in self.store.usage():
+            label = USAGE_KIND_LABELS.get(u.kind, u.kind)
+            table.add_row(label, str(u.events), format_quantity(u.kind, u.total_quantity),
+                          _fmt_ts(u.first_at), _fmt_ts(u.last_at), key=u.kind)
 
     def store_now(self) -> float:
         """取数时钟：mock 有可控时钟；pg 用 wall clock（仅展示剩余秒）。"""

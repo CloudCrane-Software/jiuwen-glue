@@ -1,11 +1,12 @@
 # coding: utf-8
-"""mock 数据层全面板取数 + 三级干预留痕（s/a/p）。"""
+"""mock 数据层全面板取数 + 三级干预留痕（s/a/p）+ 计量面板（W-04）。"""
 from __future__ import annotations
 
 import pytest
 
-from console_tui.data import (ChallengeRow, DecisionRow, LeaseRow, NodeRow,
-                              PoolSummary, TaskRow)
+from console_tui.data import (USAGE_KIND_LABELS, ChallengeRow, DecisionRow,
+                              LeaseRow, MockConsoleStore, NodeRow, PoolSummary,
+                              TaskRow, UsageRow, format_quantity)
 from console_tui.state import (KIND_APPROVE, KIND_DENY, KIND_PAUSE, KIND_RESUME,
                                KIND_STEER, ChallengeResolutionError,
                                GovernanceError, IllegalTransitionError,
@@ -14,14 +15,15 @@ from console_tui.state import (KIND_APPROVE, KIND_DENY, KIND_PAUSE, KIND_RESUME,
 MINUTE = 60.0
 
 
-# ── 五个数据面板（12.3）取数 ─────────────────────────────────────────────────
+# ── 六个数据面板（12.3 + W-04 计量）取数 ─────────────────────────────────────
 
-def test_all_five_panels_have_data(store):
+def test_all_panels_have_data(store):
     assert store.tasks() and all(isinstance(t, TaskRow) for t in store.tasks())
     assert store.leases() and all(isinstance(x, LeaseRow) for x in store.leases())
     assert store.challenges() and all(isinstance(c, ChallengeRow) for c in store.challenges())
     assert store.decisions() and all(isinstance(d, DecisionRow) for d in store.decisions())
     assert store.nodes() and all(isinstance(n, NodeRow) for n in store.nodes())
+    assert store.usage() and all(isinstance(u, UsageRow) for u in store.usage())
     assert isinstance(store.pool_summary(), PoolSummary)
 
 
@@ -57,6 +59,32 @@ def test_node_panel_and_pool_summary(store):
     assert summary.gpu_frac_trusted == pytest.approx(1.5)
     assert summary.untrusted_count == 1                    # edge-relay
     assert summary.max_parallel_total == 7
+
+
+# ── 计量面板（W-04，v2.0 §4.4 四维度）────────────────────────────────────────
+
+def test_usage_panel_covers_four_dimensions_sorted_by_kind(store):
+    rows = store.usage()
+    assert [r.kind for r in rows] == sorted(r.kind for r in rows)
+    assert {r.kind for r in rows} == set(USAGE_KIND_LABELS)
+    assert all(r.events >= 1 and r.total_quantity >= 0 for r in rows)
+    assert all(r.first_at is not None and r.last_at >= r.first_at for r in rows)
+
+
+def test_format_quantity_per_kind():
+    assert format_quantity("llm_relay", 128500) == "128,500"
+    assert format_quantity("compute_seconds", 45) == "45 s"
+    assert format_quantity("compute_seconds", 5220) == "1.4 h"
+    assert format_quantity("sandbox_seconds", 90) == "1.5 min"
+    assert format_quantity("storage_bytes", 512) == "512 B"
+    assert format_quantity("storage_bytes", 3_355_443_200) == "3.1 GB"
+    assert format_quantity("storage_bytes", 2048) == "2.0 KB"
+
+
+def test_mock_usage_panel_empty_without_seed():
+    empty = MockConsoleStore(seed=False, now=lambda: 1_800_000_000.0)
+    assert empty.usage() == []
+    assert empty.tasks() == []
 
 
 def test_tower_columns_derived_from_tasks(store):

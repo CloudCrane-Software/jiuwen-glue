@@ -24,6 +24,13 @@ VIEWS = {
                                 "max_parallel", "online_window"],
 }
 
+# W-04 计量面板：glue.v_usage 定义在 CNB company-ops ops/sql/004_usage_events.sql
+# （跨仓 DDL，本仓不可见）——按消费契约对账：data.py 的取数列必须与本声明的
+# 视图列一致（004 落库后的连接冒烟由主 agent 另做）。
+VIEWS_FROM_OPS_004 = {
+    "glue.v_usage": ["kind", "events", "total_quantity", "first_at", "last_at"],
+}
+
 
 def _code_lines(text: str) -> str:
     """去掉注释行后再做破坏性语句检查（注释里的词不算）。"""
@@ -57,13 +64,19 @@ def test_views_are_read_only_pg_dialect():
 
 
 def test_data_pg_queries_align_with_views():
-    """data.py 的取数 SQL 引用的视图必须在 003 中真实存在。"""
+    """data.py 的取数 SQL 引用的视图：003 五视图在本仓对账；
+    glue.v_usage 属跨仓 004（CNB company-ops），按消费契约对账 SELECT 列。"""
     data = DATA_PATH.read_text(encoding="utf-8")
     sql_text = SQL_PATH.read_text(encoding="utf-8")
     used_views = set(re.findall(r"FROM (glue\.v_\w+)", data))
-    assert used_views == set(VIEWS), f"取数视图与 003 不对齐: {used_views}"
-    for view in used_views:
+    assert used_views == set(VIEWS) | set(VIEWS_FROM_OPS_004), \
+        f"取数视图与视图清单不对齐: {used_views}"
+    for view in used_views & set(VIEWS):
         assert f"CREATE OR REPLACE VIEW {view}" in sql_text
+    usage_select = re.search(r'_Q_USAGE = \("([^"]+)"', data)
+    assert usage_select is not None, "缺 _Q_USAGE 取数"
+    for field in VIEWS_FROM_OPS_004["glue.v_usage"]:
+        assert field in usage_select.group(1), f"v_usage 取数缺列 {field!r}"
     # pg 写路径只允许出现这两张基础表（干预写死的范围：decision_record / challenge）
     written_tables = set(re.findall(r"INTO (glue\.\w+)|UPDATE (glue\.\w+)", data))
     flat = {a or b for a, b in written_tables}

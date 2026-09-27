@@ -1,13 +1,15 @@
 # coding: utf-8
 """console-tui 数据访问层 — mock / pg 双实现（WO-0012，v1.7 §12.3 / PROP-0005）.
 
-五个数据面板（12.3 治理面清单）与取数来源:
+六个数据面板（12.3 治理面清单 + W-04 计量面板）与取数来源:
 
 1. 工单看板    → pg: glue.v_task_board（sql/003）      / mock: 种子数据
 2. 租约        → pg: glue.v_active_lease               / mock: 种子数据
 3. ask 审批队列 → pg: glue.v_pending_challenge          / mock: 种子数据
 4. 决策记录    → pg: glue.v_recent_decision            / mock: 种子+干预追加
 5. 节点利用率  → pg: glue.v_node_utilization           / mock: 种子数据
+6. 计量 usage  → pg: glue.v_usage（004_usage_events）   / mock: 种子数据（W-04，
+   v2.0 §4.4 四维度聚合）
    塔列（agent/团队）无独立表——两种模式都从工单数据推导（derive_agents）。
 
 干预写路径（s/a/p 三级，全部留痕）:
@@ -114,6 +116,45 @@ class NodeRow:
     trust_level: str
     max_parallel: int
     online_window: str
+
+
+@dataclass(frozen=True)
+class UsageRow:
+    """计量面板行模型（v2.0 §4.4 四维度聚合；pg 读 glue.v_usage，同构）。"""
+
+    kind: str                    # llm_relay / compute_seconds / storage_bytes / sandbox_seconds
+    events: int
+    total_quantity: float
+    first_at: Optional[float]
+    last_at: Optional[float]
+
+
+USAGE_KIND_LABELS = {
+    "llm_relay": "LLM 中继(consumer)",
+    "compute_seconds": "计算秒",
+    "storage_bytes": "存储字节",
+    "sandbox_seconds": "沙箱秒",
+}
+
+
+def format_quantity(kind: str, total: float) -> str:
+    """计量总量的展示格式化（两模式共用同一条显示逻辑，无第二决策点）。"""
+    if kind == "storage_bytes":
+        size = float(total)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024 or unit == "TB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+            size /= 1024.0
+    if kind in ("compute_seconds", "sandbox_seconds"):
+        secs = float(total)
+        if secs >= 3600:
+            return f"{secs / 3600:.1f} h"
+        if secs >= 60:
+            return f"{secs / 60:.1f} min"
+        return f"{secs:.0f} s"
+    if kind == "llm_relay":
+        return f"{float(total):,.0f}"
+    return f"{float(total):,.2f}"
 
 
 @dataclass(frozen=True)
@@ -233,6 +274,7 @@ class ConsoleStore:
     def challenges(self) -> List[ChallengeRow]: raise NotImplementedError
     def decisions(self, limit: int = 20) -> List[DecisionRow]: raise NotImplementedError
     def nodes(self) -> List[NodeRow]: raise NotImplementedError
+    def usage(self) -> List[UsageRow]: raise NotImplementedError
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self.tasks(), utcnow())
     def pool_summary(self) -> PoolSummary:
@@ -256,7 +298,7 @@ class ConsoleStore:
 
 def default_mock_seed(now: float) -> Tuple[List[TaskRow], List[LeaseRow],
                                            List[ChallengeRow], List[DecisionRow],
-                                           List[NodeRow]]:
+                                           List[NodeRow], List[UsageRow]]:
     """确定性种子数据（演示/测试共用；now 可注入以便过期场景可控）。"""
     m = 60.0
     tasks = [
@@ -300,7 +342,13 @@ def default_mock_seed(now: float) -> Tuple[List[TaskRow], List[LeaseRow],
         NodeRow("work-01", 1.0, 1.0, ("shell", "vllm"), "trusted", 2, "09:00-18:00+08"),
         NodeRow("edge-relay", 0.3, 0.0, ("curl",), "untrusted", 1, "always"),
     ]
-    return tasks, leases, challenges, decisions, nodes
+    usage = [
+        UsageRow("llm_relay", 42, 128_500.0, now - 240 * m, now - 2 * m),
+        UsageRow("compute_seconds", 7, 5_220.0, now - 180 * m, now - 5 * m),
+        UsageRow("storage_bytes", 15, 3_355_443_200.0, now - 300 * m, now - 30 * m),
+        UsageRow("sandbox_seconds", 11, 1_860.0, now - 120 * m, now - 1 * m),
+    ]
+    return tasks, leases, challenges, decisions, nodes, usage
 
 
 class MockConsoleStore(ConsoleStore):
@@ -313,11 +361,11 @@ class MockConsoleStore(ConsoleStore):
         self._now = now or utcnow
         now = self._now()
         if seed:
-            self._tasks, self._leases, self._challenges, self._decisions, self._nodes = \
-                default_mock_seed(now)
+            (self._tasks, self._leases, self._challenges,
+             self._decisions, self._nodes, self._usage) = default_mock_seed(now)
         else:
-            self._tasks, self._leases, self._challenges, self._decisions, self._nodes = \
-                [], [], [], [], []
+            self._tasks, self._leases, self._challenges, self._decisions, \
+                self._nodes, self._usage = [], [], [], [], [], []
         self._challenge_by_id: Dict[str, ChallengeRow] = {c.challenge_id: c for c in self._challenges}
         self._audit: List[AuditEntry] = []
 
@@ -348,6 +396,10 @@ class MockConsoleStore(ConsoleStore):
 
     def nodes(self) -> List[NodeRow]:
         return list(self._nodes)
+
+    def usage(self) -> List[UsageRow]:
+        """计量面板（W-04）：四维度聚合行，按 kind 确定性排序。"""
+        return sorted(self._usage, key=lambda u: u.kind)
 
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self._tasks, self._now())
@@ -438,6 +490,8 @@ class PgConsoleStore(ConsoleStore):
     _Q_NODES = ("SELECT node_id, cpu_frac, gpu_frac, tools, trust_level, max_parallel,"
                 " online_window FROM glue.v_node_utilization WHERE tenant_id = %s"
                 " ORDER BY node_id")
+    _Q_USAGE = ("SELECT kind, events, total_quantity, first_at, last_at"
+                " FROM glue.v_usage WHERE tenant_id = %s ORDER BY kind")
     _Q_TASK_PAUSED = ("SELECT paused FROM glue.v_task_board WHERE tenant_id = %s"
                       " AND task_id = %s")
 
@@ -519,6 +573,14 @@ class PgConsoleStore(ConsoleStore):
             out.append(NodeRow(r[0], float(r[1]), float(r[2]), tuple(tools), r[4],
                                int(r[5]), r[6]))
         return out
+
+    def usage(self) -> List[UsageRow]:
+        """计量面板（W-04）：glue.v_usage 按维度聚合（%s 参数化，值不拼接）。"""
+        rows = self._exec(self._Q_USAGE, [self._tenant], fetch="all")
+        return [UsageRow(str(r[0]), int(r[1]), float(r[2]),
+                         self._ts(r[3]) if r[3] is not None else None,
+                         self._ts(r[4]) if r[4] is not None else None)
+                for r in rows]
 
     def audit_trail(self, limit: int = 50) -> List[AuditEntry]:
         rows = self._exec(self._Q_AUDIT, [self._tenant, int(limit)], fetch="all")

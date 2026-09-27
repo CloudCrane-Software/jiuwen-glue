@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, Input
 
 from console_tui.app import ConsoleApp, ResolveModal, SteerModal
-from console_tui.data import MockConsoleStore
+from console_tui.data import USAGE_KIND_LABELS, MockConsoleStore
 from console_tui.state import KIND_APPROVE, KIND_DENY, KIND_PAUSE, KIND_RESUME, KIND_STEER
 
 
@@ -33,11 +33,11 @@ async def pilot(store):
         yield p
 
 
-# ── 布局：塔式多列 + 状态栏 + 五面板 ─────────────────────────────────────────
+# ── 布局：塔式多列 + 状态栏 + 六面板 ─────────────────────────────────────────
 
-async def test_app_mounts_tower_status_bar_and_five_panels(pilot):
+async def test_app_mounts_tower_status_bar_and_six_panels(pilot):
     app = pilot.app
-    assert len(app.query(DataTable)) == 5               # 五个数据面板
+    assert len(app.query(DataTable)) == 6               # 六个数据面板（含 W-04 计量）
     cols = app.query(".agent-col")                      # 塔列 = 每列一 agent
     assert len(cols) == 4
     bar = static_text(app.query_one("#pool-bar"))
@@ -142,3 +142,36 @@ async def test_refresh_key_repaints_pool_bar(pilot):
     await pilot.pause()
     assert app.query_one("#tasks", DataTable).row_count == 6
     assert "mode=mock" in static_text(app.query_one("#pool-bar"))
+
+
+# ── 计量面板（W-04，v2.0 §4.4）：mock 渲染（截图级证据的 DOM 断言形态）────────
+
+async def test_usage_panel_renders_four_dimensions(pilot):
+    """mock 模式计量面板全功能渲染：四行维度 × 5 列，单元格是可读的格式化值。"""
+    app = pilot.app
+    table = app.query_one("#usage", DataTable)
+    assert table.row_count == 4                          # 四个计量维度各一行
+    assert len(table.columns) == 5                       # 维度/事件数/总量/最早/最近
+    # 面板行键 = 维度 kind；单元格含中英文标签与格式化总量（截图级证据的 DOM 断言）
+    keyed = {str(key.value): [str(c) for c in table.get_row(key)]
+             for key in table.rows.keys()}
+    assert set(keyed) == {"llm_relay", "compute_seconds",
+                          "storage_bytes", "sandbox_seconds"}
+    assert keyed["llm_relay"][0] == USAGE_KIND_LABELS["llm_relay"]
+    assert keyed["llm_relay"][1] == "42"
+    assert keyed["llm_relay"][2] == "128,500"            # token 总量带千分位
+    assert keyed["storage_bytes"][2].endswith("GB")      # 3_355_443_200 B → GB 展示
+    assert keyed["compute_seconds"][2] == "1.4 h"        # 5220 s → 小时展示
+    assert keyed["sandbox_seconds"][2] == "31.0 min"     # 1860 s → 分钟展示
+    assert all(":" in cell for row in keyed.values()
+               for cell in (row[3], row[4]))             # 时间列是 HH:MM
+
+
+async def test_usage_panel_row_keyed_by_kind_and_refreshable(pilot):
+    app = pilot.app
+    table = app.query_one("#usage", DataTable)
+    assert {str(k.value) for k in table.rows.keys()} >= {
+        "llm_relay", "compute_seconds", "storage_bytes", "sandbox_seconds"}
+    app.action_refresh()
+    await pilot.pause()
+    assert app.query_one("#usage", DataTable).row_count == 4
