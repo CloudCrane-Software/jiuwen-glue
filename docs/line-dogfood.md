@@ -11,7 +11,7 @@
 | eval 集 | `evals/guardrail-aggregate/red_cases.jsonl`（+ README） | guardrail 聚合红反例集，`kills_impl` 绑定红证明 |
 | 契约注册表 | `contracts/registry.json` | `(ref, semver) → sha256[实现文件]`，首条 `jiuwen_glue.guardrail.aggregate@0.3.0` |
 | 契约 hash 秒检 | `tools/check_contracts.py` | G7 快检半边，秒级、纯标准库、fail-closed |
-| 元门禁六维 | `tools/spec-gate/spec_gate.py` | §5.2 入库门禁首跑工具（四维实现，两维如实标 [待数据]） |
+| 元门禁六维 | `tools/spec-gate/spec_gate.py` | §5.2 入库门禁首跑工具（四维实现；D3 原口径/D6 空证据 = BLOCKED 非零退出，不放行——D4-R2 修复） |
 | 择优骨架 | `src/jiuwen_glue/selection.py`（`line.selection`） | §5.4 纯机器信号公式 + winner_ref；N>5 护栏；R1 平局豁免 |
 | CI 钩子 | CNB company-ops `.cnb.yml` 环节9 | specs 一致性静态检查 + 契约 hash 秒检（六维全跑按需） |
 
@@ -54,11 +54,14 @@
 - **按需全跑（重）**：`spec_gate.py` 六维全量（穷举输入域 + 双向变异 + 稳定性双跑 +
   旧实现快照红证明）。**CI 不默认全跑**——变异与穷举对 CI 时长不友好，按需（spec/eval
   变更 PR 或季度复检）在本地/工作机执行并落报告。
-- **[待] 项与消除条件**（不虚报）：
+- **[待] 项与消除条件**（不虚报；**空证据期间门禁 BLOCKED，不放行**——D4-R2 起
+  [待数据] 维度参与退出码，违反 v2.1 原则 2 的旧行为已废弃）：
   - D3 区分度原口径 = 分开过一次**真实扇出**：待 line 流水线扇出生成（后续工单）跑出
     首批真实候选后，用红/绿两组候选各过一次门禁取分离结论；
-  - D6 结局一致性 = 与结局标签背离率 <5%：待 usage/事故回填产生结局标签（revert 自动
-    转红 case）后计算；当前零样本，不得编造。
+  - D6 结局一致性 = 与结局标签背离率 <5%：待 usage/事故回填产生结局标签
+    （`evals/guardrail-aggregate/outcome_cases.jsonl`，revert 自动转红 case）后计算；
+    当前零样本，不得编造。
+  - 回归钉：`python -m pytest tools/spec-gate/tests/ -q`（空证据→非零、D6 阈值语义）。
 
 ## 4. 契约纪律
 
