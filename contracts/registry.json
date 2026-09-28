@@ -5,13 +5,13 @@
   "entries": [
     {
       "ref": "jiuwen_glue.guardrail.aggregate",
-      "semver": "1.0.0",
+      "semver": "1.0.1",
       "impl_file": "src/jiuwen_glue/guardrail.py",
-      "sha256": "1821b6659ed8785bb2fbb0aa5ace0ca79a5e12d41207a7a565e1138466844558",
+      "sha256": "26f870ea229a7c2abd544991c8db1b6e89554249803ef52c69264a5a6da3cc04",
       "spec": "specs/guardrail.spec.md",
       "eval": "evals/guardrail-aggregate/",
       "frozen_at": "2026-09-27",
-      "basis": "main dac0480 系（W-01 缺陷#2：聚合空集 fail-closed）+ R5/D1 修复：非规范判定值（一切非 PASS/BLOCKED 字符串）聚合收敛 UNKNOWN，不再落默认分支返回 PASS（fail-open 边界，v2.0 原则 2）。breaking：三态映射在非规范输入域上改变 → 大版本位 bump 0.3.0→1.0.0，spec 同步 bump + REQ-G-14 + eval 集 agg-red-006 + 红绿复核后重挂本表。",
+      "basis": "main dac0480 系（W-01 缺陷#2：聚合空集 fail-closed）+ R5/D1 修复：非规范判定值（一切非 PASS/BLOCKED 字符串）聚合收敛 UNKNOWN，不再落默认分支返回 PASS（fail-open 边界，v2.0 原则 2）。breaking：三态映射在非规范输入域上改变 → 大版本位 bump 0.3.0→1.0.0，spec 同步 bump + REQ-G-14 + eval 集 agg-red-006 + 红绿复核后重挂本表。+ R6/D1（1.0.0→1.0.1，非 breaking）：GuardrailRunStore.gate() 必填缺交由短路 UNKNOWN 改为折算 UNKNOWN **参与同一聚合**——已提交 BLOCKED 一票否决不再被缺交掩盖（与 aggregate()/模块 docstring/eval-gate 参考实现同序）；frozen_interface（aggregate 三态映射/常量/executable）未动，patch 位 bump + spec REQ-G-08 修订 + 测试 3 例（missing+BLOCKED=BLOCKED / missing+UNKNOWN=UNKNOWN / admission 镜像 REJECTED），floor 500→503。",
       "frozen_interface": "aggregate(verdicts: Iterable[str]) -> str；三态常量 VERDICT_PASS/VERDICT_BLOCKED/VERDICT_UNKNOWN；GuardrailResult.executable 只在 PASS 为 True。1.0.0 语义：空集→UNKNOWN；任一 BLOCKED→BLOCKED；否则任一非 PASS 值（含 UNKNOWN 与一切非法值）→UNKNOWN；全部恰为 PASS→PASS",
       "breaking_policy": "任何改变三态映射（含空集行为、非规范值行为）、executable 语义或常量取值的改动 = breaking，必须 semver 大版本位 bump + spec 版本 bump + eval 集红绿复核后重挂本表",
       "sha256_note": "规范形哈希：实现文件字节 CRLF→LF 归一（= git blob 内容，与 core.autocrlf 检出配置解耦）",

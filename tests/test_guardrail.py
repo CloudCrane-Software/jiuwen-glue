@@ -155,6 +155,31 @@ def test_missing_required_check_is_unknown(clock):
     assert "perm-rail" in result.missing_required
 
 
+def test_missing_required_with_blocked_still_blocks(clock):
+    """R6/D1：缺交折算 UNKNOWN 参与聚合，不短路掩盖已提交 BLOCKED——
+    与 aggregate()/模块 docstring/eval-gate 参考实现同序（一票否决优先于缺交）。"""
+    store = GuardrailRunStore(now=clock)
+    run = store.create_run(_spec())
+    store.submit_check(run.run_id, "static-scan", OUTCOME_BLOCKED,
+                       note="deny: CVE-2026-1234 in base image")
+    store.finalize(run.run_id, seal_ref="s-mb")
+    result = store.gate(run.run_id)
+    assert result.verdict == VERDICT_BLOCKED      # 不因 perm-rail 缺交降级为 UNKNOWN
+    assert result.executable is False
+    assert "perm-rail" in result.missing_required  # 缺交事实仍在结果里如实暴露
+
+
+def test_missing_required_with_submitted_unknown_stays_unknown(clock):
+    """R6/D1 反向钉：缺交 + 已提交 UNKNOWN（无 BLOCKED）→ 仍 UNKNOWN。"""
+    store = GuardrailRunStore(now=clock)
+    run = store.create_run(_spec())
+    store.submit_check(run.run_id, "static-scan", OUTCOME_UNKNOWN)
+    store.finalize(run.run_id, seal_ref="s-mu")
+    result = store.gate(run.run_id)
+    assert result.verdict == VERDICT_UNKNOWN
+    assert result.missing_required == ("perm-rail",)
+
+
 def test_blocked_check_blocks_whole_run(clock):
     store = GuardrailRunStore(now=clock)
     run = store.create_run(_spec())

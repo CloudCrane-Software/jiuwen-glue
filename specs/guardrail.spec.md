@@ -1,7 +1,7 @@
 # Spec: jiuwen_glue.guardrail.aggregate（聚合语义 + 逐条可判定 rubric）
 
 - ref: jiuwen_glue.guardrail.aggregate
-- semver: 1.0.0
+- semver: 1.0.1
 - 实现文件: src/jiuwen_glue/guardrail.py
 - 来源: 建设方案 v2.0 §5.2（资产层：spec = 逐条可判定 rubric，REQ-xxx 带正反例）
 - 基线: main（含 W-01 缺陷#2 修复：聚合空集 fail-closed；**1.0.0 = R5/D1 修复：非规范判定值收敛 UNKNOWN**——0.3.0 的 `aggregate(["junk"]) == PASS` 是 fail-open 边界，违反原则 2，breaking bump）
@@ -105,14 +105,16 @@
 - 判定: 结构校验 + tests/test_guardrail.py 对应断言
 
 ### REQ-G-08 必填 check 未提交时 gate 为 UNKNOWN 且 missing_required 非空
-- 规则: run 上存在至少一个 `required` 为 True 且尚未提交的 check 时，`gate` 的裁决必须为 UNKNOWN，且 `missing_required` 必须包含每一个此类 check_id，因此 `missing_required` 非空。
-- 依据: guardrail.py:319-320,325-328
+- 规则: run 上存在至少一个 `required` 为 True 且尚未提交的 check 时，`missing_required` 必须包含每一个此类 check_id，因此 `missing_required` 非空。缺交折算为 UNKNOWN **参与同一聚合**而非短路（R6/D1 与 aggregate() 一票否决同序）：已提交 check 中不存在 BLOCKED 时 `gate` 裁决必须为 UNKNOWN；已存在至少一个已提交 check 裁决为 BLOCKED 时 `gate` 裁决必须为 BLOCKED（BLOCKED 吸收——补齐缺交不可能翻转结论）。
+- 依据: guardrail.py:319-325（gate 聚合：missing 折算 UNKNOWN 入参）；guardrail.py:75-93
 - 正例:
-  - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交时调用 gate -> UNKNOWN 且 missing_required 含 c1
+  - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交且已提交 check 无 BLOCKED 时调用 gate -> UNKNOWN 且 missing_required 含 c1
+  - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交且另有已提交 check 裁决为 BLOCKED 时调用 gate -> BLOCKED 且 missing_required 含 c1
 - 反例:
   - 例: 存在 required 为 True 的 check 未提交时调用 gate -> PASS
   - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交时调用 gate -> UNKNOWN 且 missing_required 为空
   - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交时调用 gate -> UNKNOWN 且 missing_required 不含 c1
+  - 例: 存在 required 为 True 的 check 未提交且另有已提交 check 裁决为 BLOCKED 时调用 gate -> UNKNOWN
 - 判定: 结构校验 + tests/test_guardrail.py 对应断言
 
 ### REQ-G-09 required 为 False 的未提交 check 不阻断聚合
