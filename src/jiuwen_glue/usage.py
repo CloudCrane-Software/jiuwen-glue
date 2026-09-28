@@ -38,6 +38,16 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import UsageSchemaError, UsageStateError
 
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 escalation.StormGuard / challenge / billing 同口径）：
+    NaN/±inf 一律非有限；巨型 int 经 math.isfinite 抛 OverflowError——按非
+    有限同拒（D1-R6 PR#15 纪律：schema 错误不得变形为未归类崩溃）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except OverflowError:
+        return False
+
 __all__ = [
     "KIND_LLM_RELAY", "KIND_COMPUTE_SECONDS", "KIND_STORAGE_BYTES",
     "KIND_SANDBOX_SECONDS", "USAGE_KINDS",
@@ -121,7 +131,7 @@ class UsageEvent:
                 f"usage kind must be one of {USAGE_KINDS}, got {self.kind!r}")
         if isinstance(self.quantity, bool) or \
                 not isinstance(self.quantity, (int, float)) or \
-                not math.isfinite(float(self.quantity)) or float(self.quantity) < 0:
+                not _finite(self.quantity) or float(self.quantity) < 0:
             raise UsageSchemaError(
                 f"quantity must be a finite number >= 0, got {self.quantity!r}")
         if self.kind == KIND_LLM_RELAY and \
@@ -132,8 +142,10 @@ class UsageEvent:
         if self.consumer_key is not None and \
                 (not self.consumer_key or not isinstance(self.consumer_key, str)):
             raise UsageSchemaError("consumer_key must be a non-empty string when given")
-        if self.occurred_at < 0:
-            raise UsageSchemaError("occurred_at must be a non-negative epoch")
+        # R7/D1：occurred_at 非有限（NaN/±inf）落进每一个半开窗 → 重复计费
+        #（billing.UsageEventRow / _in_window 同口径 fail-closed）。
+        if not _finite(self.occurred_at) or self.occurred_at < 0:
+            raise UsageSchemaError("occurred_at must be a finite non-negative epoch")
         if self.settlement_class not in SETTLEMENT_CLASSES:
             raise UsageSchemaError(
                 f"settlement_class must be one of {SETTLEMENT_CLASSES}, "
