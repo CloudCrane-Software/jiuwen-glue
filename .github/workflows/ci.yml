@@ -30,6 +30,12 @@
 # （巨型 int/datetime/垃圾 str 不再 OverflowError/TypeError/ValueError 未归类
 # 崩溃）+ 四模块 _finite 增纳 TypeError（非数值 → 非有限归类拒绝）补 1 用例，
 # floor 508→509 同轮棘轮（eval-gate 在场口径 510 passed + 0 skipped 实测）。
+# D1-R7 三轮（终局）：费率卡快照 hash 整卡扩面（grok 红队：lines-only 锚点下
+# 篡改生效窗/客户归属/币种/版本后载入验签照样通过——窗期静默拉长可对原窗外
+# 事件结算，绕过 out-of-window fail-closed）补 1 用例
+# （test_rate_card_hash_anchors_full_card_not_lines_only，六类字段篡改逐一
+# 失配拒载），floor 509→510 同轮棘轮（eval-gate 在场口径 511 passed + 0
+# skipped 实测）。
 name: ci
 
 on:
@@ -61,5 +67,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 509 ] || { echo "passed=$N < 509 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 509)"
+          [ "$N" -ge 510 ] || { echo "passed=$N < 510 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 510)"

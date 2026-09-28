@@ -28,8 +28,10 @@
 费率卡（:class:`RateCard`）纪律（注册表规范见 CNB company-ops ``billing/``）：
 
 - 版本化 + 生效窗口 + **签名快照 hash**（:func:`rate_card_snapshot_hash`，
-  sha256(canonical JSON of lines)）；:func:`parse_rate_card` 载入即验 hash，
-  改一行价格即验签失败。
+  sha256(canonical JSON of **整卡**——身份/窗口/版本 + 价格行；D1-R7 终局轮自
+  lines-only 扩面，扩面时注册表零实卡=零迁移））；:func:`parse_rate_card`
+  载入即验 hash，卡上任何字段（价格行/生效窗/客户归属/币种/版本/卡号）被改
+  即验签失败。
 - **从不原地改**：卡是 frozen dataclass，无任何变更路径；改价 = 新版本
   新文件（v2），历史账单永远可用历史卡重算（可重算性）。
 
@@ -608,14 +610,33 @@ class RateCardLine:
         }
 
 
-def rate_card_snapshot_hash(lines: Sequence[RateCardLine]) -> str:
-    """签名快照 hash：sha256(canonical JSON of lines 按 line_id 排序)。
+def rate_card_snapshot_hash(*, schema: str, rate_card_id: str,
+                            customer_id: str, currency: str, version: int,
+                            effective_from: float,
+                            effective_until: Optional[float],
+                            lines: Sequence[RateCardLine]) -> str:
+    """签名快照 hash：sha256(canonical JSON of **整卡**)。
 
-    这是"快照"的唯一算法（写死）：改任何一行价格/单位/最低消费 → hash 变；
-    解析时验签（:func:`verify_rate_card`），从不原地改的锚点。
+    payload = 身份与窗口（schema/rate_card_id/customer_id/currency/version/
+    effective_from/effective_until——epoch 以 ``float()`` 收敛后入 JSON）+
+    价格行（``to_canonical``，按 line_id 排序）。这是"快照"的唯一算法（写死）：
+    改任何一行价格/单位/最低消费**或**生效窗/客户归属/币种/版本/卡号 →
+    hash 变；解析时验签（:func:`verify_rate_card`），从不原地改的锚点。
+
+    D1-R7 终局轮自 lines-only 扩面（grok 红队发现：窗期被静默拉长的卡可对
+    原窗外事件结算，绕过 out-of-window fail-closed；客户归属/币种/版本同理
+    ——「生效窗/版本由 git 历史钉」对载入时攻击者无效，而载入验签正是 hash
+    的防区）。扩面时注册表零实卡（company-ops billing/README §0），无迁移。
     """
-    payload = [line.to_canonical() for line in
-               sorted(lines, key=lambda l: l.line_id)]
+    payload = {
+        "schema": schema, "rate_card_id": rate_card_id,
+        "customer_id": customer_id, "currency": currency, "version": version,
+        "effective_from": float(effective_from),
+        "effective_until": None if effective_until is None
+        else float(effective_until),
+        "lines": [line.to_canonical() for line in
+                  sorted(lines, key=lambda l: l.line_id)],
+    }
     return "sha256:" + hashlib.sha256(
         _canonical_json(payload).encode("utf-8")).hexdigest()
 
@@ -673,13 +694,19 @@ class RateCard:
 
 
 def verify_rate_card(card: RateCard) -> str:
-    """重算快照 hash 并与卡上声明比对；不符即 BillingSchemaError（防篡改锚点）。"""
-    computed = rate_card_snapshot_hash(card.lines)
+    """重算快照 hash（整卡口径）并与卡上声明比对；不符即 BillingSchemaError
+    （防篡改锚点——D1-R7 终局轮起锚点覆盖身份/窗口/版本/价格行全字段）。"""
+    computed = rate_card_snapshot_hash(
+        schema=card.schema, rate_card_id=card.rate_card_id,
+        customer_id=card.customer_id, currency=card.currency,
+        version=card.version, effective_from=card.effective_from,
+        effective_until=card.effective_until, lines=card.lines)
     if computed != card.snapshot_hash:
         raise BillingSchemaError(
             f"rate card {card.rate_card_id} snapshot hash mismatch: "
             f"declared {card.snapshot_hash} != computed {computed} "
-            "(lines were tampered after signing)")
+            "(card was tampered after signing — 锚点覆盖整卡：身份/生效窗/"
+            "币种/版本/价格行)")
     return computed
 
 
@@ -687,7 +714,8 @@ def parse_rate_card(mapping: Mapping) -> RateCard:
     """从注册表 YAML/JSON dict 解析费率卡（含生效窗口与快照 hash 验签）。
 
     时间字段 ISO8601（须带时区，缺省按 UTC）；``signature.snapshot_hash``
-    必填——解析即验签，篡改一行价格在此处即失败。
+    必填——解析即验签（整卡口径），篡改任何被锚字段（价格行/生效窗/客户
+    归属/币种/版本/卡号）在此处即失败。
     """
     schema = mapping.get("schema")
     if schema != RATE_CARD_SCHEMA:
