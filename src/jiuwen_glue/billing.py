@@ -8,14 +8,15 @@
 
 三件能力（全部纯函数，零网络、零时钟、零 I/O——同输入恒同输出）:
 
-1. :func:`aggregate_by_project` —— internal 模式按 project 归集
-   （对应 SQL：``SELECT project_id, kind, meter_type, count(*), sum(quantity),
-   sum(quantity*shadow_price) FROM glue.usage_event GROUP BY ...``；
-   落库视图 ``glue.v_usage_by_project`` 同构，DDL 见 CNB company-ops
-   ``ops/sql/006_billing_p0.sql``）。
+1. :func:`aggregate_by_project` —— internal 模式按 租户×project 归集
+   （对应 SQL：``SELECT tenant_id, project_id, kind, meter_type, count(*),
+   sum(quantity), sum(quantity*shadow_price) FROM glue.usage_event
+   GROUP BY tenant_id, ...``；
+   落库视图 ``glue.v_usage_by_project`` 同构（按 租户×模式×项目×kind 分组），
+   DDL 见 CNB company-ops ``ops/sql/006_billing_p0.sql``）。
 2. :func:`weekly_report` —— 影子成本周报（markdown）：输入=计量事件×
    :class:`ShadowPriceTable`（resources/ 档案 ``shadow_pricing`` 段投影），
-   输出=每项目用量×影子成本表。**影子期红线：周报只记录，不驱动任何
+   输出=每 租户×项目 用量×影子成本表。**影子期红线：周报只记录，不驱动任何
    调度策略调整**（v2.1 施工红线）；报告内无生成时刻——时间只来自入参
    窗口，同输入两次渲染逐字节一致。
 3. :func:`deterministic_settle` —— 结算引擎骨架：``deterministic_settle(
@@ -323,8 +324,13 @@ class ShadowPriceTable:
 
 @dataclass(frozen=True)
 class UsageAggRow:
-    """项目×kind×meter_type 聚合行（v_usage_by_project 同构的内存投影）。"""
+    """租户×项目×kind×meter_type 聚合行（v_usage_by_project 同构的内存投影）。
 
+    权威视图按 租户×模式×项目×kind 分组（006_billing_p0.sql），本行携带
+    所属租户——tenant_id 列全对象贯通（v2.0 §4.2 行5），聚合边界不断链。
+    """
+
+    tenant_id: str
     kind: str
     meter_type: Optional[str]
     events: int
@@ -337,8 +343,13 @@ class UsageAggRow:
 
 @dataclass(frozen=True)
 class ProjectUsage:
-    """单个项目的归集结果（project_id=None 即"未归集"桶，如实保留）。"""
+    """单个项目的归集结果（project_id=None 即"未归集"桶，如实保留）。
 
+    tenant_id 参与分组：跨租户同名 project_id 各自成桶，成本归集不串户
+    （与 v_usage_by_project 的 租户×模式×项目 分组同口径）。
+    """
+
+    tenant_id: str
     project_id: Optional[str]
     settlement_class: str
     rows: Tuple[UsageAggRow, ...]
@@ -362,7 +373,10 @@ def aggregate_by_project(events: Iterable[object], *,
     """按 project 归集（半开窗 [start, end)，均只读，不改输入顺序外任何状态）。
 
     未声明 project_id 的事件落入 ``project_id=None`` 桶（未归集如实可见，
-    不悄悄丢弃）；settlement_class 参与分组（internal/trial/free 各自成桶）。
+    不悄悄丢弃）；settlement_class 参与分组（internal/trial/free 各自成桶）；
+    tenant_id 同样参与分组（缺省/空白归 ``t0``，与 DDL 004 ``DEFAULT 't0'``
+    同口径）——跨租户同名 project_id 各自成桶，成本归集不串户
+    （与 v_usage_by_project 的 租户×模式×项目×kind 分组同口径）。
     """
     materialized = tuple(events)
     groups: dict = {}
@@ -371,6 +385,8 @@ def aggregate_by_project(events: Iterable[object], *,
             continue
         project = getattr(e, "project_id", None)
         project = project if isinstance(project, str) and project.strip() else None
+        tenant = getattr(e, "tenant_id", None)
+        tenant = tenant if isinstance(tenant, str) and tenant.strip() else "t0"
         sclass = getattr(e, "settlement_class", SETTLEMENT_INTERNAL)
         if sclass not in SETTLEMENT_CLASSES:
             raise BillingSchemaError(
@@ -383,7 +399,7 @@ def aggregate_by_project(events: Iterable[object], *,
         shadow_unit = getattr(e, "shadow_unit", None)
         shadow_unit = shadow_unit if isinstance(shadow_unit, str) and shadow_unit else None
         at = float(getattr(e, "occurred_at", 0.0) or 0.0)
-        gkey = (project, sclass)
+        gkey = (tenant, project, sclass)
         rkey = (kind, meter)
         g = groups.setdefault(gkey, {"rows": {}, "events": 0, "quantity": 0.0})
         row = g["rows"].setdefault(rkey, {
@@ -400,20 +416,22 @@ def aggregate_by_project(events: Iterable[object], *,
         g["quantity"] += quantity
 
     out = []
-    for (project, sclass) in sorted(groups, key=lambda k: (k[0] is None, k[0] or "", k[1])):
-        g = groups[(project, sclass)]
+    for (tenant, project, sclass) in sorted(groups, key=lambda k: (
+            k[0], k[1] is None, k[1] or "", k[2])):
+        g = groups[(tenant, project, sclass)]
         rows = []
         for (kind, meter) in sorted(g["rows"], key=lambda k: (
                 USAGE_KINDS.index(k[0]) if k[0] in USAGE_KINDS else len(USAGE_KINDS),
                 k[0] or "", k[1] or "")):
             r = g["rows"][(kind, meter)]
             rows.append(UsageAggRow(
-                kind=kind, meter_type=meter, events=r["events"],
+                tenant_id=tenant, kind=kind, meter_type=meter, events=r["events"],
                 quantity=r["quantity"], snapshot_cost=_q4(r["snapshot_cost"]),
                 shadow_unit=r["shadow_unit"], first_at=r["first_at"],
                 last_at=r["last_at"]))
         out.append(ProjectUsage(
-            project_id=project, settlement_class=sclass, rows=tuple(rows),
+            tenant_id=tenant, project_id=project, settlement_class=sclass,
+            rows=tuple(rows),
             events=g["events"], quantity=g["quantity"],
             snapshot_cost=_q4(sum((r.snapshot_cost for r in rows), Decimal(0)))))
     return tuple(out)
@@ -434,7 +452,8 @@ def _render_project_section(usage: ProjectUsage, table: Optional[ShadowPriceTabl
     """渲染单项目小节；返回该项目价表口径成本（命中行全量重估对照，
     含快照已估价行；快照成本在 ProjectUsage 内）。"""
     label = usage.project_id if usage.project_id else UNATTRIBUTED_LABEL
-    lines.append(f"### 项目：{label}（{usage.settlement_class}）\n")
+    lines.append(
+        f"### 项目：{label}（{usage.settlement_class}，租户 {usage.tenant_id}）\n")
     lines.append("| kind | meter_type | 事件数 | 用量合计 | 单位 | "
                  "影子成本(快照) | 影子成本(价表) | 计价来源 |")
     lines.append("|---|---|---:|---:|---|---:|---:|---|")
