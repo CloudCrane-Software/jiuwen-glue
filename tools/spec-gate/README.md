@@ -22,8 +22,12 @@ python tools/check_contracts.py                          # 契约 hash 秒检（
 | D5 红证明（新 case 旧实现断言失败） | 已实现：`kills_impl=pre-w01-fail-open` 红反例对 `old_impls.py`（6f4674c 快照，fail-open 缺陷原样保留）复现失败 |
 | D6 结局一致性（背离率 <5%） | **BLOCKED（空证据）**：零结局标签样本（`evals/guardrail-aggregate/outcome_cases.jsonl` 回流后自动转可计算），无法计算也不得编造，**门禁不放行**（D4-R2 修复：此前 [待数据] 维度不参与退出码——已废弃） |
 
-> **退出码语义（D4-R2 起）**：0 = 六维全部 PASS；D3/D6 等空证据维度 = BLOCKED →
-> 1；有证据不达阈值 = FAIL → 1。`--static-only`（CI 环节9）不受影响。回归测试：
+> **退出码语义（D4-R2 起；D4-R3 扩及 --static-only）**：0 = 门禁过；D3/D6 等空证据
+> 维度 = BLOCKED → 1；有证据不达阈值 = FAIL → 1。`--static-only`（CI 环节9）
+> **同口径（D4-R3）**：静态层通过后同样裁决 D3/D6 证据，空证据 = BLOCKED → 1——
+> 真实扇出接线与 outcome_cases.jsonl 回流前环节9 维持 BLOCKED，属 v2.0 §5.2/M3
+> 钉定的 fail-closed 状态，不得以放宽门禁恢复绿色（此前 static-only 在六维计算前
+> return 0 的行为已废止）。回归测试：
 > `python -m pytest tools/spec-gate/tests/ -q`（D1-R3 起已入根 testpaths，随整仓
 > 门禁自动跑，整仓口径 486→495）。
 
