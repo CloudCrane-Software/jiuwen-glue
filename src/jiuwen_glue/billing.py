@@ -376,15 +376,26 @@ class ProjectUsage:
     snapshot_cost: Decimal
 
 
-def _in_window(event: object, start: Optional[float], end: Optional[float]) -> bool:
-    # R7/D1：非有限时间戳无法落入任何确定的半开窗（nan 与一切比较均为 False
-    # → 原实现使其落入**每一个**窗口，不相交窗重复计费）——duck-typed 装载
-    # 路径（aggregate_by_project 的 SimpleNamespace 契约）与行构造同口径
-    # fail-closed：拒算而非多计/漏计（billing 不允许含糊）。
-    # R7/D1 二轮（grok）：float() 转换本身可抛 OverflowError（巨型 int）/
-    # TypeError（datetime 等非数值）/ValueError（不可解析 str）——包转为同一条
-    # schema 错误，不再变形为未归类崩溃（承 PR#15 纪律）。
-    raw = getattr(event, "occurred_at", 0.0) or 0.0
+def _event_epoch(event: object) -> float:
+    """duck-typed 装载路径的 occurred_at 归一（窗口/归集体/结算共用一处口径）。
+
+    R7/D1：非有限时间戳无法落入任何确定的半开窗（nan 与一切比较均为 False
+    → 原实现使其落入**每一个**窗口，不相交窗重复计费）——duck 装载
+    路径（aggregate_by_project 的 SimpleNamespace 契约）与行构造同口径
+    fail-closed：拒算而非多计/漏计（billing 不允许含糊）。
+    R7/D1 二轮（grok）：float() 转换本身可抛 OverflowError（巨型 int）/
+    TypeError（datetime 等非数值）/ValueError（不可解析 str）——包转为同一条
+    schema 错误，不再变形为未归类崩溃（承 PR#15 纪律）。
+    R7 修复轮（终局）：原 ``raw or 0.0`` 的 falsy 强转使 occurred_at=None/""
+    被静默变为 epoch 0——含 0 的窗里被计入（first_at/last_at 元数据被 0 污染），
+    不含 0 的窗里被静默排除（漏计），「非有限时间戳拒算」闸被绕过。显式 None
+    一律拒算；属性**缺失**保持 0.0 缺省不改（投影不完整行的既有接受面）；
+    真实 epoch 0（int 0/0.0，行构造口径的合法域）不被误伤。"""
+    raw = getattr(event, "occurred_at", 0.0)
+    if raw is None:
+        raise BillingSchemaError(
+            "event occurred_at must be a finite epoch to be windowed, got None "
+            "(a falsy placeholder must not silently become epoch 0)")
     try:
         at = float(raw)
     except (OverflowError, TypeError, ValueError) as exc:
@@ -394,6 +405,11 @@ def _in_window(event: object, start: Optional[float], end: Optional[float]) -> b
     if not math.isfinite(at):
         raise BillingSchemaError(
             f"event occurred_at must be a finite epoch to be windowed, got {at!r}")
+    return at
+
+
+def _in_window(event: object, start: Optional[float], end: Optional[float]) -> bool:
+    at = _event_epoch(event)
     if start is not None and at < start:
         return False
     if end is not None and at >= end:
@@ -428,11 +444,23 @@ def aggregate_by_project(events: Iterable[object], *,
         kind = getattr(e, "kind", None)
         meter = getattr(e, "meter_type", None)
         meter = meter if isinstance(meter, str) and meter.strip() else None
-        quantity = float(getattr(e, "quantity", 0.0))
+        # R7 修复轮（终局）：quantity 与同函数 occurred_at 包转口径收敛——
+        # 巨型 int/不可解析 str/None/datetime 原变形为 OverflowError/ValueError/
+        # TypeError 未归类崩溃（行构造路径同输入本就 BillingSchemaError，
+        # 两路径同口径）；非 finite 入口即拒（原经 _dec 在快照成本行才报）。
+        raw_q = getattr(e, "quantity", 0.0)
+        try:
+            quantity = float(raw_q)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise BillingSchemaError(
+                f"event quantity must be a finite number >= 0, got {raw_q!r}") from exc
+        if not math.isfinite(quantity):
+            raise BillingSchemaError(
+                f"event quantity must be a finite number >= 0, got {quantity!r}")
         shadow_price = _dec(getattr(e, "shadow_price", 0) or 0, "event.shadow_price")
         shadow_unit = getattr(e, "shadow_unit", None)
         shadow_unit = shadow_unit if isinstance(shadow_unit, str) and shadow_unit else None
-        at = float(getattr(e, "occurred_at", 0.0) or 0.0)
+        at = _event_epoch(e)
         gkey = (tenant, project, sclass)
         rkey = (kind, meter)
         g = groups.setdefault(gkey, {"rows": {}, "events": 0, "quantity": 0.0})
@@ -842,9 +870,12 @@ def deterministic_settle(usage_window: Iterable[object], rate_card: RateCard, *,
       一致**；账单行按 line_id 排序，与事件输入顺序无关。
     """
     materialized = tuple(usage_window)
-    # 生效窗校验（fail-closed）：先全量检查，再聚合——错误信息一次给全
-    offenders = [e for e in materialized if not rate_card.covers(
-        float(getattr(e, "occurred_at", 0.0) or 0.0))]
+    # 生效窗校验（fail-closed）：先全量检查，再聚合——错误信息一次给全。
+    # R7 修复轮（终局，同类扩面）：occurred_at 归一走 _event_epoch（原内联
+    # float(... or 0.0) 未包转——巨型 int/datetime 变形为未归类崩溃，None falsy
+    # 强转为 epoch 0 后报误导性「outside rate card」），与 _in_window 同口径。
+    offenders = [e for e in materialized
+                 if not rate_card.covers(_event_epoch(e))]
     if offenders:
         sample = ", ".join(str(getattr(e, "event_id", e)) for e in offenders[:3])
         raise BillingSettleError(
@@ -894,7 +925,7 @@ def deterministic_settle(usage_window: Iterable[object], rate_card: RateCard, *,
             min_charge_applied=min_applied))
 
     total = _q4(sum((l.amount for l in bill_lines), Decimal(0)))
-    times = [float(getattr(e, "occurred_at", 0.0) or 0.0) for e in materialized]
+    times = [_event_epoch(e) for e in materialized]
     return SettlementResult(
         engine=SETTLE_ENGINE, rate_card_id=rate_card.rate_card_id,
         rate_card_version=rate_card.version,

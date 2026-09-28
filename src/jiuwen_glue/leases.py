@@ -32,6 +32,7 @@
 """
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional
@@ -51,6 +52,16 @@ EXHAUSTED = "EXHAUSTED"
 EXPIRED = "EXPIRED"
 REVOKED = "REVOKED"
 _TERMINAL = {EXHAUSTED, EXPIRED, REVOKED}
+
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 challenge/escalation/usage/billing 同款）：NaN/±inf 一律
+    非有限；巨型 int（如 10**400）经 math.isfinite 抛 OverflowError——按非有限
+    同拒（schema 错误不得变形为未归类崩溃；#16 同口径推广到本模块）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
+        return False
 
 
 def _utcnow() -> float:
@@ -153,6 +164,23 @@ class BudgetLedger:
         if not isinstance(amount, int) or amount < 0:
             self._log("-", "GRANT_REJECTED", reason="amount must be a non-negative int", amount=amount)
             raise LeaseDerivationError("amount must be a non-negative int")
+        # R7 修复轮（终局补漏，#16 推广到本模块）：ttl_seconds 与 challenge.open
+        # 同口径构造期拒绝——NaN 经 ``ttl <= 0`` 恒 False 静默通过 →
+        # expires_at=nan → is_expired_at（now >= nan 恒 False）永不惰性过期，
+        # 「租约过期即断流」过期闸 fail-open；±inf 同理永不过期；巨型 int 经
+        # now+ttl 的 float 转换抛未归类 OverflowError；非数值类型（str 等）与
+        # 非正数（含负 ttl——租约出生即过期的静默态，DB 层
+        # CHECK(expires_at>granted_at) 才拒而进程内参考语义层不拒）一并拒绝。
+        # 校验先于父租约处理（拒绝路径零副作用，父剩余不动）。
+        if ttl_seconds is not None and (
+                not isinstance(ttl_seconds, (int, float)) or not _finite(ttl_seconds)
+                or ttl_seconds <= 0):
+            self._log("-", "GRANT_REJECTED",
+                      reason="ttl_seconds must be a positive finite number",
+                      ttl_seconds=repr(ttl_seconds))
+            raise LeaseDerivationError(
+                "ttl_seconds must be a positive finite number "
+                "(NaN/inf never expire — an endless lease is not allowed)")
         now = self._now()
         parent: Optional[BudgetLease] = None
         if parent_lease_id is not None:

@@ -4,8 +4,10 @@
 # 元资产纪律（PROP-0001 v2.1 §11/§14）：本文件改动强制 owner PR 审（zizmor 常开）。
 # 口径：仓根裸 pytest 全量（testpaths 四件套 = tests/ + providers/e2b_compat +
 # tools/console-tui + tools/spec-gate/tests），floor 断言随上游如实核查回填
-# （只升不降，不许静默放行）；当前 floor=500 对应 D1-R5 修复提交本地实测 500
-# passed（主包 363 + e2b_compat 41 + console-tui 87 + spec-gate 语义测试 9）。
+# （只升不降，不许静默放行）；当前 floor=517 对应 D1-R7 修复轮（终局补漏）
+# 本地实测 517 passed + 1 skipped（CI 口径，CI 不装 eval-gate；eval-gate 在场
+# 518 passed + 0 skipped；主包 381 + e2b_compat 41 + console-tui 87 +
+# spec-gate 语义测试 9）。
 # D1-R3：spec-gate fail-closed 语义回归钉（空证据维度 BLOCKED 非零退出）自本轮
 # 起随整仓门禁自动跑，不再只靠人工按需运行（验收 D1-R3 Issue#2）。
 # D4-R3：spec-gate --static-only 与全跑同口径（空证据 BLOCKED 非零退出，验收
@@ -36,6 +38,16 @@
 # （test_rate_card_hash_anchors_full_card_not_lines_only，六类字段篡改逐一
 # 失配拒载），floor 509→510 同轮棘轮（eval-gate 在场口径 511 passed + 0
 # skipped 实测）。
+# D1-R7 修复轮（终局补漏，R7 待修清单域 D1 六条）：#16 非有限数值闸推广到
+# R6/R7 扫荡漏网的三个模块——leases.grant ttl_seconds（NaN/±inf 永不过期=
+# 「租约过期即断流」fail-open、巨型 int OverflowError、负 ttl 出生即过期静默）
+# + fleet ShareLedger.commit gpu_frac（NaN 入账使份额闸比较恒 False，单笔
+# 投毒 GPU_SHORTFALL→admitted overcommit）+ fleet 自取制 lease_ttl（NaN 穿过
+# ttl<=0 与 TTL≤1h cap 双闸）+ billing duck 路径两处收口（quantity 未包转四类
+# 输入变形为未归类崩溃；occurred_at ``or 0.0`` falsy 强转使 None/"" 静默变
+# epoch 0——含 0 窗多计/不含 0 窗漏计；settle 生效窗预检同类扩面）补 7 用例
+# （lease 2 + billing 3 + fleet 2），floor 510→517 同轮棘轮（CI 口径
+# 517 passed + 1 skipped / eval-gate 在场 518 passed + 0 skipped 实测）。
 name: ci
 
 on:
@@ -67,5 +79,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 510 ] || { echo "passed=$N < 510 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          [ "$N" -ge 517 ] || { echo "passed=$N < 517 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
           echo "jiuwen-glue floor OK: $N passed (>= 510)"

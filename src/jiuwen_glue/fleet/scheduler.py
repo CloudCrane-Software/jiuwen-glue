@@ -43,6 +43,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 import uuid
@@ -63,6 +64,16 @@ from .errors import (
     WorkOrderStateError,
 )
 from .registration import NODE_ACTIVE, FleetRegistry, NodeRecord
+
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 challenge/escalation/usage/billing/leases 同款）：NaN/±inf
+    一律非有限；巨型 int（如 10**400）经 math.isfinite 抛 OverflowError——按
+    非有限同拒（schema 错误不得变形为未归类崩溃；#16 同口径推广到本模块）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
+        return False
 
 __all__ = [
     "GPU_FRAC_EPS",
@@ -231,6 +242,16 @@ class ShareLedger:
     def commit(self, assignment_id: str, node_id: str, gpu_frac: float) -> None:
         if assignment_id in self._by_assignment:
             raise SchedulingError(f"assignment {assignment_id} already committed")
+        # R7 修复轮（终局，D4-R7 抽查补漏）：非有限/越域 gpu_frac 构造期拒绝——
+        # NaN 入账后 committed_gpu=nan，``gpu_demand > free_gpu + GPU_FRAC_EPS``
+        # 对 nan 恒 False → GPU 份额闸被静默绕过（实测：节点 committed=1.0 时
+        # demand 0.95 正确拒 GPU_SHORTFALL，一笔 NaN 投毒后同 demand 变
+        # admitted=overcommit fail-open）；gpu_frac 声明域是 [0,1] 份额，
+        # 越域值（如 1.5）本就是直接 overcommit，一并拒绝。
+        if not isinstance(gpu_frac, (int, float)) or not _finite(gpu_frac) \
+                or not (0.0 <= gpu_frac <= 1.0):
+            raise SchedulingError(
+                f"gpu_frac must be a finite fraction in [0, 1], got {gpu_frac!r}")
         self._by_assignment[assignment_id] = (node_id, round(float(gpu_frac), 9))
         self._gpu_by_node[node_id] = round(
             self._gpu_by_node.get(node_id, 0.0) + float(gpu_frac), 9)
@@ -752,9 +773,23 @@ class GreedyScheduler:
         if dispatch not in (DISPATCH_DIRECT, DISPATCH_SELF_PICK):
             raise SchedulingError(f"unknown dispatch mode: {dispatch!r}")
         if dispatch == DISPATCH_SELF_PICK:
-            ttl = DEFAULT_SELF_PICK_LEASE_SECONDS if lease_ttl is None else float(lease_ttl)
-            if ttl <= 0:
-                raise SchedulingError(f"lease ttl must be positive, got {ttl}")
+            # R7 修复轮（终局，D4-R7 抽查补漏）：非有限 ttl 构造期拒绝——NaN 经
+            # ``ttl <= 0`` 与 ``ttl > max_self_pick_lease`` 双比较恒 False 静默
+            # 穿过两道闸（TTL≤1h 上限闸对 NaN 失效——执行面 token 短命语义被
+            # 旁路，实测 ACCEPTED）；巨型 int 经 float() 抛未归类 OverflowError。
+            # 与 ttl_seconds 全库同口径（leases/challenge/_finite 家族）。
+            if lease_ttl is None:
+                ttl = DEFAULT_SELF_PICK_LEASE_SECONDS
+            else:
+                try:
+                    ttl = float(lease_ttl)
+                except (OverflowError, TypeError, ValueError) as exc:
+                    raise SchedulingError(
+                        f"lease ttl must be a positive finite number, "
+                        f"got {lease_ttl!r}") from exc
+                if not _finite(ttl) or ttl <= 0:
+                    raise SchedulingError(
+                        f"lease ttl must be a positive finite number, got {ttl}")
             if ttl > self.max_self_pick_lease:
                 return Rejected(
                     task_ref=offering.task_ref, code=REJECT_TTL_CAP,

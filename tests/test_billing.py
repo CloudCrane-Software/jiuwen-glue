@@ -507,3 +507,64 @@ def test_trial_and_free_classes_flow_through_aggregation():
     assert usage[1].rows[0].snapshot_cost == Decimal("14.4000")   # 60 × 0.24
     report = weekly_report(events, start=0, end=100)
     assert "proj-trial（trial，租户 t0）" in report and "proj-a（free，租户 t0）" in report
+
+
+# ── R7 修复轮（终局）：duck 装载路径同口径补漏 ────────────────────────────────
+
+def _duck_ev(**kw):
+    base = dict(project_id="proj-x", settlement_class=SETTLEMENT_INTERNAL,
+                kind=KIND_COMPUTE_SECONDS, meter_type=None, quantity=5.0,
+                shadow_price=0, shadow_unit=None, occurred_at=50.0)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_duck_quantity_unclassifiable_types_classified_not_crash():
+    """R7 修复轮（终局）：duck 装载路径 quantity 无包转——巨型 int /
+    不可解析 str / None / datetime 原变形为 OverflowError / ValueError /
+    TypeError 未归类崩溃（同一提交刚为同函数 occurred_at 建立的「schema
+    错误不得变形为未归类崩溃」口径不对称）；一律包转 BillingSchemaError
+    （行构造路径 __post_init__ 同输入本就归类拒绝，两路径收敛同口径）。"""
+    for bad_q in (10**400, "abc", None, datetime(2026, 1, 1)):
+        with pytest.raises(BillingSchemaError, match="quantity"):
+            aggregate_by_project([_duck_ev(quantity=bad_q)],
+                                 start=0.0, end=100.0)
+    # 非 finite（NaN/±inf）同样拒绝（原经 _dec 在快照成本行才报，现入口即拒）
+    for bad_q in (float("nan"), float("inf")):
+        with pytest.raises(BillingSchemaError, match="quantity"):
+            aggregate_by_project([_duck_ev(quantity=bad_q)],
+                                 start=0.0, end=100.0)
+
+
+def test_falsy_occurred_at_never_silently_epoch_zero():
+    """R7 修复轮（终局）：``raw or 0.0`` 的 falsy 强转使 occurred_at=None/""
+    被静默变为 epoch 0——含 0 的窗口里被计入（first_at/last_at 元数据被 0
+    污染），不含 0 的窗口里被静默排除（漏计）——R7「非有限时间戳拒算」闸被
+    falsy 强转绕过，违背「拒算而非多计/漏计」。显式 None/"" 一律拒算；
+    真实 epoch 0（int 0 / 0.0，行构造口径的合法域）不被误伤。"""
+    for bad_at in (None, ""):
+        with pytest.raises(BillingSchemaError, match="occurred_at"):
+            aggregate_by_project([_duck_ev(occurred_at=bad_at)],
+                                 start=0.0, end=100.0)
+        with pytest.raises(BillingSchemaError, match="occurred_at"):
+            aggregate_by_project([_duck_ev(occurred_at=bad_at)],
+                                 start=1_700_000_000.0, end=1_700_060_480.0)
+    # epoch 0 仍是合法时间戳（不被本修复误收紧）
+    kept = aggregate_by_project([_duck_ev(occurred_at=0), _duck_ev(occurred_at=0.0)],
+                                start=0.0, end=100.0)
+    assert kept[0].events == 2
+    assert kept[0].rows[0].first_at == 0.0 and kept[0].rows[0].last_at == 0.0
+
+
+def test_settle_duck_occurred_at_unclassifiable_classified_not_crash():
+    """R7 修复轮（终局，同类扩面）：deterministic_settle 的生效窗预检
+    ``float(getattr(e, "occurred_at", 0.0) or 0.0)`` 同样未包转（巨型 int /
+    datetime 原变形为未归类崩溃）且带 falsy 强转（None → epoch 0 落在卡窗外
+    报「outside rate card」误导性错误）——与 _in_window 同口径包转拒绝。"""
+    card = parse_rate_card(_card_mapping())
+    for bad_at in (10**400, datetime(2026, 1, 1), None, ""):
+        ev = _duck_ev(occurred_at=bad_at, quantity=1.0,
+                      settlement_class=SETTLEMENT_CUSTOMER,
+                      meter_type="cnb_core_hours", customer_id="cust-acme")
+        with pytest.raises(BillingSchemaError, match="occurred_at"):
+            deterministic_settle([ev], card)
