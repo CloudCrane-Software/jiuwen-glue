@@ -159,7 +159,8 @@ class TaskOffering:
     def __post_init__(self) -> None:
         if not self.task_ref or not isinstance(self.task_ref, str):
             raise SchedulingError("task_ref must be a non-empty reference")
-        if not isinstance(self.gpu_demand, (int, float)):
+        if isinstance(self.gpu_demand, bool) or \
+                not isinstance(self.gpu_demand, (int, float)):
             raise SchedulingError(
                 f"gpu_demand must be a float in [0.0, 1.0], got {self.gpu_demand!r}")
         try:
@@ -375,8 +376,17 @@ class ResourcePressure:
             value = getattr(self, name)
             if value is None:
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or \
-                    not (0.0 <= float(value) <= 1.0):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise SchedulingError(
+                    f"ResourcePressure.{name} must be None or float in [0.0, 1.0], "
+                    f"got {value!r}")
+            try:
+                value_f = float(value)
+            except OverflowError:            # 巨型 int：归类拒绝，不变形为未归类
+                raise SchedulingError(       # OverflowError（D1-R6① 纪律）
+                    f"ResourcePressure.{name} must be None or float in [0.0, 1.0], "
+                    f"got {value!r}") from None
+            if not (0.0 <= value_f <= 1.0):
                 raise SchedulingError(
                     f"ResourcePressure.{name} must be None or float in [0.0, 1.0], "
                     f"got {value!r}")
@@ -459,9 +469,14 @@ def pressures_from_meter_rows(
             continue
         resource = str(resource)
         ratio = row.get("remaining_ratio")
-        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and \
-                0.0 <= float(ratio) <= 1.0:
-            explicit.setdefault(resource, {}).setdefault(kind, float(ratio))
+        ratio_f = None
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+            try:
+                ratio_f = float(ratio)
+            except OverflowError:         # 巨型 int：与越界有限值同款回落 value
+                ratio_f = None            # 换算路径，投影不崩溃（外部计量行输入面）
+        if ratio_f is not None and 0.0 <= ratio_f <= 1.0:
+            explicit.setdefault(resource, {}).setdefault(kind, ratio_f)
             continue                      # 直读行优先，不再当已用量换算
         entry = used.setdefault(resource, {})
         value = row.get("value")

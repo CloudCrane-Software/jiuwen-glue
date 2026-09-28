@@ -182,14 +182,16 @@ class RuleBasedBackend(JevBackend):
                     raise JevBackendError(
                         f"rule #{idx}: classify rule needs a non-empty string label")
                 conf = rule.get("confidence", 1.0)
-                if isinstance(conf, bool) or not isinstance(conf, (int, float)) \
-                        or not 0.0 <= float(conf) <= 1.0:
+                conf_f = None if isinstance(conf, bool) \
+                    or not isinstance(conf, (int, float)) else _to_float(conf)
+                if conf_f is None or not 0.0 <= conf_f <= 1.0:
                     raise JevBackendError(
                         f"rule #{idx}: confidence must be a number within [0, 1], got {conf!r}")
             elif primitive == PRIMITIVE_SCORE:
                 value = rule.get("value")
-                if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                        or not math.isfinite(float(value)):
+                value_f = None if isinstance(value, bool) \
+                    or not isinstance(value, (int, float)) else _to_float(value)
+                if value_f is None or not math.isfinite(value_f):
                     raise JevBackendError(
                         f"rule #{idx}: score rule needs a finite numeric value, got {value!r}")
                 rubric = rule.get("rubric")
@@ -337,6 +339,17 @@ def _utcnow() -> float:
     return time.time()
 
 
+def _to_float(v: Any) -> Optional[float]:
+    """float() 包转（D1-R8 二批，D1-R6①「schema 错误不得变形为未归类崩溃」
+    纪律）：巨型 int（如 10**400）越出 float 域按 ``None`` 处理，由调用方归入
+    各自的既有非法值路径（声明面 JevBackendError / 运行面 refuse），不再泄漏
+    未归类 OverflowError。"""
+    try:
+        return float(v)
+    except OverflowError:
+        return None
+
+
 class DecisionLayer:
     """决策层门面：按原语路由后端 + 每次决策落一条 DecisionRecord。
 
@@ -448,9 +461,11 @@ class DecisionLayer:
                          agent_ref=who, tenant_id=tid)
             return None
         confidence = outcome.confidence
-        if confidence is not None and (isinstance(confidence, bool)
-                                       or not isinstance(confidence, (int, float))
-                                       or not 0.0 <= float(confidence) <= 1.0):
+        confidence_f = None if confidence is None \
+            or isinstance(confidence, bool) or not isinstance(confidence, (int, float)) \
+            else _to_float(confidence)
+        if confidence is not None and (confidence_f is None
+                                       or not 0.0 <= confidence_f <= 1.0):
             self._refuse(PRIMITIVE_CLASSIFY,
                          f"classify backend returned out-of-range confidence {confidence!r}",
                          agent_ref=who, tenant_id=tid)
@@ -496,8 +511,9 @@ class DecisionLayer:
                          "— UNKNOWN (fail-closed)", agent_ref=who, tenant_id=tid)
             return None
         value = outcome.value
-        if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                or not math.isfinite(float(value)):
+        value_f = None if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            else _to_float(value)
+        if value_f is None or not math.isfinite(value_f):
             self._refuse(PRIMITIVE_SCORE,
                          f"score backend returned non-finite/non-numeric score {value!r} "
                          "— refused, never fabricate", agent_ref=who, tenant_id=tid)

@@ -145,6 +145,15 @@ def test_field_count_cap_enforced():
         b.build(fields=too_many, options=_options())
 
 
+# ── D1-R8 二批（grok 红队草稿属实线索）：选项投影 score 巨型 int 拒绝不变形 ──
+
+def test_placement_option_giant_int_score_typed_rejection():
+    """from_mapping score=10**400 → StateBuilderError（此前 except 只纳
+    TypeError/ValueError，float(10**400) 的 OverflowError 未归类泄漏）。"""
+    with pytest.raises(StateBuilderError):
+        PlacementOption.from_mapping({"option_id": "x", "score": 10**400})
+
+
 def test_value_size_cap_enforced():
     b = SandboxPlacementStateBuilder(_spec())   # max_value_chars=200
     big = "x" * 300

@@ -134,7 +134,15 @@ class NodeCapacity:
             raise CapacitySchemaError("node_id must be a non-empty string")
         for name in ("cpu_frac", "gpu_frac"):
             v = getattr(self, name)
-            if not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise CapacitySchemaError(
+                    f"{name} must be a float in [0.0, 1.0], got {v!r}")
+            try:
+                v_f = float(v)
+            except OverflowError:            # 巨型 int：归类拒绝，不变形为未归类
+                raise CapacitySchemaError(   # OverflowError（D1-R6① 纪律）
+                    f"{name} must be a float in [0.0, 1.0], got {v!r}") from None
+            if not (0.0 <= v_f <= 1.0):
                 raise CapacitySchemaError(
                     f"{name} must be a float in [0.0, 1.0], got {v!r}")
         if isinstance(self.gpu_priority, bool) or \
