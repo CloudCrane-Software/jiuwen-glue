@@ -16,7 +16,8 @@
 - **撤销 revoke**：级联——撤销父租约时所有后代租约一并 REVOKED（"级联撤销"），
   未花完的额度随之作废；之后任何占用被拒（LeaseRevokedError）。级联遍历独立于
   本节点状态：父租约已终态（EXPIRED/EXHAUSTED，含惰性过期）不阻止后代被撤销
-  （v2.0 §3.3，W-01 缺陷 #1 修复）。
+  （v2.0 §3.2 租约级联语义，W-01 缺陷 #1 修复；仅租约树内级联——§3.3 跨圈
+  失效传播属〔缺口〕尚未实现，勿与本级联混同）。
 - 所有事件（含被拒绝的占用）追加进 audit 日志：检测 = 拒绝 + 留痕。
 - **权限交集联动（v1.7 §12.5，WO-0003 返工）**：签发时可传入
   identity.effective_permissions 的求值结果并**固化进租约**（perms 快照 + 三层身份
@@ -293,7 +294,8 @@ class BudgetLedger:
     def revoke(self, lease_id: str, *, reason: str = "") -> List[str]:
         """撤销租约并级联撤销全部后代租约；返回被撤销的 lease_id 列表。
 
-        级联语义（v2.0 §3.3，W-01 缺陷 #1 修复）：级联遍历**独立于本节点状态**——
+        级联语义（v2.0 §3.2 租约级联语义，W-01 缺陷 #1 修复；仅租约树内级联
+        ——§3.3 跨圈失效传播属〔缺口〕尚未实现，勿混同）：级联遍历**独立于本节点状态**——
         本节点已是终态（EXPIRED/EXHAUSTED/REVOKED，含惰性过期）不阻止其后代被
         继续撤销，已死父租约下的 ACTIVE 子租约不再成为孤儿；本租约惰性过期在
         本次撤销调用内同步生效后仍照常级联。终态节点保持原状态（不重复落
@@ -314,7 +316,7 @@ class BudgetLedger:
                 revoked.append(cur)
                 self._log(cur, "REVOKE", reason=reason, cascade=(cur != lease_id))
             # 终态节点：不重复撤销，但**必须继续遍历后代**——
-            # 级联是否触达后代与本节点状态无关（v2.0 §3.3）。
+            # 级联是否触达后代与本节点状态无关（v2.0 §3.2 租约级联）。
             stack.extend(l.lease_id for l in self.children_of(cur))
         return revoked
 
