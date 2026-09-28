@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -53,6 +54,16 @@ __all__ = [
 NODE_ACTIVE = "ACTIVE"
 NODE_STALE = "STALE"
 NODE_DEREGISTERED = "DEREGISTERED"
+
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 challenge/escalation/usage/billing/leases/scheduler 同款）：
+    NaN/±inf 一律非有限；巨型 int（如 10**400）经 math.isfinite 抛
+    OverflowError——按非有限同拒（schema 错误不得变形为未归类崩溃）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
+        return False
 
 TRUST_LEVELS = (TRUST_TRUSTED, TRUST_UNTRUSTED)
 
@@ -220,10 +231,16 @@ class NodeRegistration:
                 f"node_id {self.node_id!r}")
         if not isinstance(self.attestation, NodeAttestation):
             raise RegistrationError("attestation must be a NodeAttestation")
+        # R7 修复轮（终局，grok 抽查点 5 落地）：NaN 经 ``ttl <= 0`` 恒 False
+        # 静默通过本闸 → sweep/惰性判定的 ``now > last_seen + ttl`` 对 nan 恒
+        # False → 心跳超窗 STALE 兜底死亡语义（僵尸节点出池）对 NaN 节点永不
+        # 触发；巨型 int 经 last_seen+ttl 的 float 语境抛未归类 OverflowError。
+        # 同 #16 _finite 家族构造期拒绝（NaN/±inf/巨型 int/非数值）。
         if not isinstance(self.heartbeat_ttl_seconds, (int, float)) or \
+                not _finite(self.heartbeat_ttl_seconds) or \
                 self.heartbeat_ttl_seconds <= 0:
             raise RegistrationError(
-                f"heartbeat_ttl_seconds must be a positive number, "
+                f"heartbeat_ttl_seconds must be a positive finite number, "
                 f"got {self.heartbeat_ttl_seconds!r}")
         if self.agent_ref is not None and (not isinstance(self.agent_ref, str)
                                            or not self.agent_ref):

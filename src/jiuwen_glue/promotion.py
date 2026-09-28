@@ -26,11 +26,22 @@ tombstone 撤回路径：promoted → withdrawn（墓碑标记，append-only 不
 from __future__ import annotations
 
 import copy
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .errors import PromotionTransitionError, UnknownPromotionAssetError
+
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 challenge/escalation/usage/billing/leases/fleet 同款）：
+    NaN/±inf 一律非有限；巨型 int（如 10**400）经 math.isfinite 抛
+    OverflowError——按非有限同拒（schema 错误不得变形为未归类崩溃）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
+        return False
 
 STAGE_WORKING = "working"
 STAGE_SHORTLIST = "shortlist"
@@ -260,6 +271,25 @@ class PromotionLedger:
             if score is None:
                 _reject("score", GATE_UNKNOWN,
                         {"why": "score_hook returned None (decision layer abstains)"})
+                return cand
+            # R7 修复轮（终局，grok 抽查点 5 落地）：hook 输出异常族扩纳——
+            # ①NaN/±inf 分使 ``score < min_score`` 恒 False → min_score 门禁
+            # 静默放行（实测 NaN 分直接 PROMOTED，与 StormGuard ``nan<0`` 同族
+            # fail-open）；②巨型 int 经 float() OverflowError、datetime 等经
+            # TypeError 未归类崩溃（hook raise 已 fail-closed，转换崩溃却绕过
+            # 该语义）。数值 str 也按 hook 契约违约拒绝——score_hook 是可调用
+            # 程序接口（返回数值或 None），与 DB 行投影的 lenient str 口径不同。
+            # 一律 GATE_UNKNOWN 弃权拒绝（fail-closed，升级被阻）。
+            if not isinstance(score, (int, float)):
+                _reject("score", GATE_UNKNOWN,
+                        {"why": f"score_hook returned a non-numeric score: {score!r} "
+                                f"(hook contract: a number or None)"})
+                return cand
+            if not _finite(score):
+                _reject("score", GATE_UNKNOWN,
+                        {"why": f"score_hook returned a non-finite score: {score!r} "
+                                f"(nan < min_score is always False — gate would "
+                                f"silently admit)"})
                 return cand
             score = float(score)
             if score < self.min_score:

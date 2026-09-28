@@ -216,3 +216,15 @@ def test_persistence_hooks_called(clock):
         ("status", "node-1", NODE_STALE),
         ("status", "node-1", NODE_DEREGISTERED),
     ]
+
+
+def test_registration_rejects_nonfinite_heartbeat_ttl(clock):
+    """R7 修复轮（终局，grok 抽查点 5 落地）：heartbeat_ttl_seconds=NaN 原经
+    ``ttl <= 0`` 恒 False 静默通过注册闸 → ``now > last_seen + nan`` 恒 False
+    → 心跳超窗 STALE 兜底死亡语义对 NaN 节点永不触发（僵尸节点永久在池可被
+    派工）。构造期同 #16 _finite 家族口径拒绝（NaN/±inf/巨型 int/非数值）。"""
+    from jiuwen_glue.fleet import RegistrationError
+    for bad in (float("nan"), float("inf"), float("-inf"), 10**400, "300"):
+        with pytest.raises(RegistrationError, match="heartbeat_ttl_seconds"):
+            make_registration("node-bad", now=clock.now_value,
+                              heartbeat_ttl_seconds=bad)

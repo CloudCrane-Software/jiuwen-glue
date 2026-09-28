@@ -4,9 +4,9 @@
 # 元资产纪律（PROP-0001 v2.1 §11/§14）：本文件改动强制 owner PR 审（zizmor 常开）。
 # 口径：仓根裸 pytest 全量（testpaths 四件套 = tests/ + providers/e2b_compat +
 # tools/console-tui + tools/spec-gate/tests），floor 断言随上游如实核查回填
-# （只升不降，不许静默放行）；当前 floor=517 对应 D1-R7 修复轮（终局补漏）
-# 本地实测 517 passed + 1 skipped（CI 口径，CI 不装 eval-gate；eval-gate 在场
-# 518 passed + 0 skipped；主包 381 + e2b_compat 41 + console-tui 87 +
+# （只升不降，不许静默放行）；当前 floor=519 对应 D1-R7 修复轮（终局补漏）
+# 本地实测 519 passed + 1 skipped（CI 口径，CI 不装 eval-gate；eval-gate 在场
+# 520 passed + 0 skipped；主包 383 + e2b_compat 41 + console-tui 87 +
 # spec-gate 语义测试 9）。
 # D1-R3：spec-gate fail-closed 语义回归钉（空证据维度 BLOCKED 非零退出）自本轮
 # 起随整仓门禁自动跑，不再只靠人工按需运行（验收 D1-R3 Issue#2）。
@@ -48,6 +48,16 @@
 # epoch 0——含 0 窗多计/不含 0 窗漏计；settle 生效窗预检同类扩面）补 7 用例
 # （lease 2 + billing 3 + fleet 2），floor 510→517 同轮棘轮（CI 口径
 # 517 passed + 1 skipped / eval-gate 在场 518 passed + 0 skipped 实测）。
+# D1-R7 修复轮二批（grok 交叉红队抽查点 5 落地，PR #23）：①promotion
+# score_hook 返回 NaN/±inf 使 ``score < min_score`` 恒 False → min_score 门禁
+# 静默放行（实测 NaN 分直接 PROMOTED）——hook 输出异常族（raise/None 既有）
+# 扩纳非有限与非数值类型，一律 GATE_UNKNOWN 弃权拒绝；②NodeRegistration
+# heartbeat_ttl_seconds NaN 经 ``ttl<=0`` 恒 False 通过注册闸 →
+# ``now > last_seen + nan`` 恒 False → STALE 兜底死亡语义永不触发（僵尸节点
+# 永久在池）——构造期 _finite 家族拒绝；③duck quantity 错误消息去掉未强执行
+# 的 '>= 0' 声明（消息如实化，零行为变化）。补 2 用例（promotion 1 +
+# registration 1），floor 517→519 同轮棘轮（CI 口径 519 passed + 1 skipped /
+# eval-gate 在场 520 passed + 0 skipped 实测）。
 name: ci
 
 on:
@@ -79,5 +89,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 517 ] || { echo "passed=$N < 517 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 517)"
+          [ "$N" -ge 519 ] || { echo "passed=$N < 519 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 519)"

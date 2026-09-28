@@ -453,10 +453,10 @@ def aggregate_by_project(events: Iterable[object], *,
             quantity = float(raw_q)
         except (OverflowError, TypeError, ValueError) as exc:
             raise BillingSchemaError(
-                f"event quantity must be a finite number >= 0, got {raw_q!r}") from exc
+                f"event quantity must be a finite number, got {raw_q!r}") from exc
         if not math.isfinite(quantity):
             raise BillingSchemaError(
-                f"event quantity must be a finite number >= 0, got {quantity!r}")
+                f"event quantity must be a finite number, got {quantity!r}")
         shadow_price = _dec(getattr(e, "shadow_price", 0) or 0, "event.shadow_price")
         shadow_unit = getattr(e, "shadow_unit", None)
         shadow_unit = shadow_unit if isinstance(shadow_unit, str) and shadow_unit else None
