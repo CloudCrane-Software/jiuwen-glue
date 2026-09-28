@@ -131,3 +131,94 @@ def test_rule3_failure_case_internal_steps_do_not_become_tasks(clock):
                     depends_on=("导出",)),
     ])
     assert len(ok2) == 2
+
+
+# ── D1-R8：铁律 3 依赖声明必须可核验且落账（docstring「违规必被检测」对
+#    depends_on 分支此前不成立：捏造兄弟标题/空串真值元组均放行、声明整体丢弃）──
+
+def test_rule3_dependency_claims_are_verified(clock):
+    """depends_on 声明不可捏造：悬空引用 / 仅空串的真值元组 / 自依赖 →
+    Rule3UnverifiableDependency 拒绝 + violation_log 留痕 + 零副作用。"""
+    from jiuwen_glue import Rule3UnverifiableDependency
+
+    def specs(dep):
+        return [
+            SubtaskSpec(title="导出", deliverable="dump 文件", owner="dba"),
+            SubtaskSpec(title="导入", deliverable="导入完成报告", owner="dba",
+                        depends_on=dep),
+        ]
+
+    led = TaskLedger(now=clock)
+    parent = led.create("迁移数据", owner="dba")
+    # 捏造不存在的兄弟标题 → 此前放行（真值判定即通过）
+    with pytest.raises(Rule3UnverifiableDependency):
+        led.split_task(parent.task_id, specs(("不存在的兄弟",)))
+    # 仅空串的真值元组 → 此前同样放行
+    with pytest.raises(Rule3UnverifiableDependency):
+        led.split_task(parent.task_id, specs(("",)))
+    # 自依赖（自己等自己）→ 拒绝
+    led2 = TaskLedger(now=clock)
+    p2 = led2.create("迁移数据二", owner="dba")
+    with pytest.raises(Rule3UnverifiableDependency):
+        led2.split_task(p2.task_id, [
+            SubtaskSpec(title="导出", deliverable="dump 文件", owner="dba",
+                        depends_on=("导出",)),
+            SubtaskSpec(title="导入", deliverable="导入完成报告", owner="dba"),
+        ])
+    # 违规全部留痕（铁律 3）
+    for l in (led, led2):
+        assert any(v.rule_no == 3 and v.code == "RULE3_DEPENDENCY_UNVERIFIED"
+                   for v in l.violation_log)
+    # 拒绝路径零副作用：不产生任何子任务
+    assert not [t for t in led._tasks.values()
+                if t.parent_task_id == parent.task_id]
+    assert not [t for t in led2._tasks.values()
+                if t.parent_task_id == p2.task_id]
+
+
+def test_rule3_dependency_cycle_is_rejected(clock):
+    """兄弟依赖环（A→B→A）= 互相等待的死锁拆分 → 拒绝 + 留痕 + 零副作用。"""
+    from jiuwen_glue import Rule3UnverifiableDependency
+
+    led = TaskLedger(now=clock)
+    parent = led.create("互等对", owner="dba")
+    with pytest.raises(Rule3UnverifiableDependency):
+        led.split_task(parent.task_id, [
+            SubtaskSpec(title="A", deliverable="a", owner="dba",
+                        depends_on=("B",)),
+            SubtaskSpec(title="B", deliverable="b", owner="dba",
+                        depends_on=("A",)),
+        ])
+    assert any(v.code == "RULE3_DEPENDENCY_UNVERIFIED"
+               for v in led.violation_log)
+    assert not [t for t in led._tasks.values()
+                if t.parent_task_id == parent.task_id]
+
+
+def test_rule3_duplicate_sibling_titles_are_rejected(clock):
+    """depends_on 按兄弟标题引用——同拆分内标题重复使引用歧义 → 拒绝 + 留痕。"""
+    from jiuwen_glue import Rule3UnverifiableDependency
+
+    led = TaskLedger(now=clock)
+    parent = led.create("重复标题", owner="dba")
+    with pytest.raises(Rule3UnverifiableDependency):
+        led.split_task(parent.task_id, [
+            SubtaskSpec(title="同题", deliverable="d1", owner="alice"),
+            SubtaskSpec(title="同题", deliverable="d2", owner="bob"),
+        ])
+    assert any(v.code == "RULE3_DEPENDENCY_UNVERIFIED"
+               for v in led.violation_log)
+
+
+def test_rule3_valid_dependency_is_persisted(clock):
+    """合法依赖落账：Task.depends_on 保存经验证的兄弟标题引用（此前声明被
+    整体丢弃——无 DAG、无留痕，「明确依赖」分支不可核验）。"""
+    led = TaskLedger(now=clock)
+    parent = led.create("迁移数据", owner="dba")
+    ok = led.split_task(parent.task_id, [
+        SubtaskSpec(title="导出", deliverable="dump 文件", owner="dba"),
+        SubtaskSpec(title="导入", deliverable="导入完成报告", owner="dba",
+                    depends_on=("导出",)),
+    ])
+    assert ok[0].depends_on == ()
+    assert ok[1].depends_on == ("导出",)

@@ -122,3 +122,15 @@ def test_select_rejects_bad_signals_on_pass_candidate():
                     signals={"eval": 0.9})  # 缺四信号
     with pytest.raises(SelectionRejectedError):
         select([bad], gate_verdicts={"cand-a": "PASS"})
+
+
+# ── D1-R8：巨型 int 信号拒绝不变形（float(10**400) OverflowError →
+#    SelectionRejectedError；D1-R6①「schema 错误不得变形为未归类崩溃」同款）──
+
+def test_score_giant_int_signal_rejected_as_selection_error():
+    """signal 传 10**400：isinstance((int,float)) 通过但 float(v) 抛
+    OverflowError——必须归类为 SelectionRejectedError（方向本就 fail-closed，
+    修的是错误类型漂移：只捕 SelectionRejectedError 的择优回路不再漏接崩溃）。"""
+    with pytest.raises(SelectionRejectedError):
+        score({"eval": 10**400, "mutation": 0.8, "conciseness": 0.5,
+               "differential_consensus": 0.7, "budget": 0.6})

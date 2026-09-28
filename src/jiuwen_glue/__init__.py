@@ -155,6 +155,7 @@ from .errors import (
     Rule1MessageIsNotClaim,
     Rule2ConversationIsNotState,
     Rule3InternalStepIsNotTask,
+    Rule3UnverifiableDependency,
     UnknownCapabilityError,
     UnknownChallengeError,
     UnknownDecisionError,
@@ -337,6 +338,7 @@ __all__ = [
     # errors
     "IronRuleViolation",
     "Rule1MessageIsNotClaim", "Rule2ConversationIsNotState", "Rule3InternalStepIsNotTask",
+    "Rule3UnverifiableDependency",
     "BudgetExceededError", "LeaseDerivationError", "LeaseExhaustedError",
     "LeaseExpiredError", "LeaseRevokedError",
     "IllegalTransitionError", "EvidenceImmutableError",

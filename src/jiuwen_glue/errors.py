@@ -109,6 +109,16 @@ class Rule3InternalStepIsNotTask(IronRuleViolation):
     code = "INTERNAL_STEP_IS_NOT_TASK"
 
 
+class Rule3UnverifiableDependency(IronRuleViolation):
+    """铁律 3：depends_on 声明不构成「明确依赖」——悬空引用（兄弟标题不存在）、
+    非字符串/空串条目、自依赖、兄弟依赖环、同拆分内标题重复（按标题引用歧义）。
+    声明的依赖必须可核验并落账（Task.depends_on），否则同 owner 内部步骤可借
+    虚假声明洗白成任务。"""
+
+    rule_no = 3
+    code = "RULE3_DEPENDENCY_UNVERIFIED"
+
+
 class UnknownTaskError(GlueError):
     pass
 

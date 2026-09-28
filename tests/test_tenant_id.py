@@ -11,6 +11,7 @@ from jiuwen_glue import (
     CapabilityRegistry,
     EvidenceStore,
     PromotionLedger,
+    SubtaskSpec,
     TaskLedger,
 )
 
@@ -130,3 +131,36 @@ def test_ablation_default_and_explicit_tenant(clock):
         min_samples=10).run(lambda item, out: float(out))
     assert res0.tenant_id == "t0"
     assert all(p.tenant_id == "t0" for p in res0.pairs)
+
+
+# ── D1-R8：split_task 租户传播（v2.0 §4.2 tenant_id 列全对象贯通）────────────
+
+def test_split_task_propagates_parent_tenant(clock):
+    """拆分传播：子任务继承父任务租户——父任务 tenant_id='tA' 拆出的子任务
+    不得静默落回默认 't0'（此前 create() 未传 tenant_id，SubtaskSpec.tenant_id
+    声明被忽略成死字段）。"""
+    led = TaskLedger(now=clock)
+    parent = led.create("父任务", owner="boss", tenant_id="tA")
+    kids = led.split_task(parent.task_id, [
+        SubtaskSpec(title="子一", deliverable="d1", owner="alice"),
+        SubtaskSpec(title="子二", deliverable="d2", owner="bob", tenant_id="tA"),
+    ])
+    assert [t.tenant_id for t in kids] == ["tA", "tA"]
+
+
+def test_split_task_rejects_cross_tenant_spec(clock):
+    """跨租户拆分拒绝：SubtaskSpec 显式声明租户 ≠ 父租户 → 拒绝 + 留痕 +
+    零副作用（对齐 fleet REJECT_TENANT 的租户隔离口径，fail-closed）。"""
+    led = TaskLedger(now=clock)
+    parent = led.create("父任务", owner="boss", tenant_id="tA")
+    with pytest.raises(Exception) as ei:
+        led.split_task(parent.task_id, [
+            SubtaskSpec(title="子一", deliverable="d1", owner="alice"),
+            SubtaskSpec(title="子二", deliverable="d2", owner="bob",
+                        tenant_id="tB"),
+        ])
+    assert "tenant" in str(ei.value).lower()
+    assert any(v.code == "TENANT_MISMATCH" for v in led.violation_log)
+    # 拒绝路径零副作用：不产生任何子任务
+    assert not [t for t in led._tasks.values()
+                if t.parent_task_id == parent.task_id]
