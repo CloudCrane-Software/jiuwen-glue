@@ -122,7 +122,7 @@ def _finite(v: object) -> bool:
     D1-R6 PR#15 引入，R7 起提升为模块级供 escalate 的姊妹参数同口径复用）。"""
     try:
         return math.isfinite(v)  # type: ignore[arg-type]
-    except OverflowError:
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
         return False
 
 
