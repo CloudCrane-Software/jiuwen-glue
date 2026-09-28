@@ -80,4 +80,4 @@ jobs:
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
           [ "$N" -ge 517 ] || { echo "passed=$N < 517 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 510)"
+          echo "jiuwen-glue floor OK: $N passed (>= 517)"
