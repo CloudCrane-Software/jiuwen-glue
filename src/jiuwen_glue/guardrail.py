@@ -78,15 +78,17 @@ def aggregate(verdicts: Iterable[str]) -> str:
     - **空集 → UNKNOWN**（W-01 缺陷 #2 修复：无任何结论 = 检查器缺失/凭证缺失
       同类的信息不足，永不 PASS——无证据不放行）；
     - 任一 BLOCKED → BLOCKED；
-    - 否则任一 UNKNOWN → UNKNOWN；
-    - 否则 PASS。
+    - 否则**任一非 PASS 值（含 UNKNOWN 与一切非法值）→ UNKNOWN**
+      （R5 修复：非法值此前落入默认分支返回 PASS——fail-open 边界，与 eval-gate
+      `gate.aggregate` coerce→UNKNOWN 语义分歧；原则 2 fail-closed 无例外）；
+    - 否则（全部恰为 PASS）→ PASS。
     """
     vs = list(verdicts)
     if not vs:
         return VERDICT_UNKNOWN
     if any(v == VERDICT_BLOCKED for v in vs):
         return VERDICT_BLOCKED
-    if any(v == VERDICT_UNKNOWN for v in vs):
+    if any(v != VERDICT_PASS for v in vs):  # UNKNOWN 与一切非法值 → UNKNOWN（fail-closed 无例外）
         return VERDICT_UNKNOWN
     return VERDICT_PASS
 

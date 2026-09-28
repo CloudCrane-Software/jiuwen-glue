@@ -13,6 +13,11 @@
 # floor 495→497 同轮棘轮。
 # D1-R4：租约派生同租户不变式（跨租户派生拒绝 + 继承父租户，验收 D1-R4 #2）
 # 补 2 用例，floor 497→499 同轮棘轮。
+# D1-R5：aggregate 非法判定值收敛 UNKNOWN（fail-closed 无例外，验收 D1-R5 #1）
+# 补 1 用例，floor 499→500 同轮棘轮。另有双聚合一致性回归 1 例
+# （test_aggregate_matches_eval_gate_reference）需 eval-gate 在场，CI 不装则
+# skip（本地 501 passed + 1 skipped / CI 500 passed + 1 skipped）——floor 按
+# CI 口径 500 计，skip 不计入 passed（eval-gate README 偏差登记行 R5 订正句）。
 name: ci
 
 on:
@@ -44,5 +49,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 499 ] || { echo "passed=$N < 499 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 499)"
+          [ "$N" -ge 500 ] || { echo "passed=$N < 500 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 500)"

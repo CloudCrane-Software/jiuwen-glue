@@ -61,6 +61,42 @@ def test_aggregate_semantics():
     assert aggregate([VERDICT_UNKNOWN, VERDICT_BLOCKED]) == VERDICT_BLOCKED
 
 
+def test_aggregate_noncanonical_verdict_fail_closed():
+    """非法判定值不得落入默认分支返回 PASS（fail-closed 无例外，R5 D1 修复）。
+
+    与 eval-gate `gate.aggregate`（coerce_verdict 把一切非规范值收敛 UNKNOWN）
+    语义对齐：本函数是 v2.0 §3.1 钉定的参考聚合语义且公开导出，
+    非法值 = 信息不足，永不 PASS。
+    """
+    assert aggregate(["junk"]) == VERDICT_UNKNOWN
+    assert aggregate(["PASS", "junk"]) == VERDICT_UNKNOWN
+    assert aggregate(["junk", VERDICT_BLOCKED]) == VERDICT_BLOCKED  # 一票否决仍优先
+    assert aggregate(["pass"]) == VERDICT_UNKNOWN                   # 大小写不豁免
+    assert aggregate([" BLOCKED"]) == VERDICT_UNKNOWN               # 空白不豁免
+    assert aggregate([None]) == VERDICT_UNKNOWN                     # 类型异常值同样收敛
+
+
+def test_aggregate_matches_eval_gate_reference():
+    """双聚合一致性回归（偏差登记 2026-09-28 D4-R1 的保障落地，R5 D1）。
+
+    eval-gate `gate.aggregate` 是 glue 参考聚合的第二份实现（协议聚合薄层）；
+    eval-gate 在场时逐输入比对两实现（任一侧漂移即红），未安装则 skip
+    （此时跨仓一致性无常驻回归保障——eval-gate README 偏差登记行已如实写明）。
+    """
+    eg = pytest.importorskip("eval_gate.gate")
+    inputs = [
+        [], ["PASS"], ["BLOCKED"], ["UNKNOWN"],
+        ["PASS", "PASS"], ["PASS", "BLOCKED"], ["PASS", "UNKNOWN"],
+        ["UNKNOWN", "BLOCKED"], ["junk"], ["PASS", "junk"],
+        ["pass"], [" BLOCKED"], [None], ["", "PASS"],
+    ]
+    for verdicts in inputs:
+        ours = aggregate(verdicts)
+        theirs = eg.aggregate([eg.CheckResult(check_id=f"c{i}", verdict=v)
+                               for i, v in enumerate(verdicts)])
+        assert ours == theirs, (verdicts, ours, theirs)
+
+
 def test_aggregate_fail_closed_end_to_end(clock):
     """空集聚合经 store.gate()/admission 全链路仍是 UNKNOWN（fail-closed 贯通）。
 

@@ -1,7 +1,7 @@
 # evals/guardrail-aggregate — guardrail 聚合 eval 集（line. 资产）
 
 - 资产类别：**eval 集**（v2.0 §5.2：资产 = spec / eval 集 / 契约，版本化、**只增不删**）
-- 覆盖对象：`jiuwen_glue.guardrail.aggregate`（契约 `contracts/registry.json` 首条，semver 0.3.0）
+- 覆盖对象：`jiuwen_glue.guardrail.aggregate`（契约 `contracts/registry.json` 首条，semver 1.0.0（0.3.0→1.0.0 breaking bump = R5/D1：非规范判定值收敛 UNKNOWN，配套 agg-red-006 / REQ-G-14））
 - 判定器：`tools/spec-gate/spec_gate.py`（六维元门禁）；同目录 `red_cases.jsonl` 为机读红反例集
 - 来源工单：W-05（M3 P0 line. 层 jiuwen-glue 自 dogfood）
 
