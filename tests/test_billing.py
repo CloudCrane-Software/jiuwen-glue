@@ -208,13 +208,17 @@ def test_weekly_report_renders_projects_and_is_byte_identical():
     # 输入顺序打乱 → 输出不变（渲染前全排序）
     shuffled = list(reversed(mk_events()))
     assert weekly_report(shuffled, **kw) == r1
-    # 内容断言：两项目 + 未归集桶都在；快照成本 75；价表回填 36（150×0.24）
+    # 内容断言：两项目 + 未归集桶都在；快照成本 75；价表对照 36（150×0.24，
+    # 命中行全量重估、含快照已估价行——D1-R2 勘误：非"未估价才回填"旧口径）
     assert "### 项目：proj-a（internal）" in r1
     assert "### 项目：proj-b（internal）" in r1
     assert "### 项目：（未归集）" in r1
     assert "| 75.0000 |" in r1 and "| 36.0000 |" in r1
     assert "cnb-sandbox#shadow_pricing[0] source=doc" in r1
     assert "未估价" in r1                                            # 无价行如实标注
+    # 口径锁定（D1-R2）：已估价行同列呈现快照/价表两个数（75 vs 36）+ 命中来源
+    assert "| 75.0000 | 36.0000 | cnb-sandbox#shadow_pricing[0] source=doc |" in r1
+    assert "回填" not in r1                                          # 旧"回填"口径文案已废止
 
 
 # ── 费率卡：解析、验签、防篡改 ────────────────────────────────────────────────

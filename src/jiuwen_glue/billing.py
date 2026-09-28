@@ -431,7 +431,8 @@ def _fmt_num(value: float) -> str:
 
 def _render_project_section(usage: ProjectUsage, table: Optional[ShadowPriceTable],
                             lines: list) -> Decimal:
-    """渲染单项目小节；返回该项目价表口径成本（快照成本在 ProjectUsage 内）。"""
+    """渲染单项目小节；返回该项目价表口径成本（命中行全量重估对照，
+    含快照已估价行；快照成本在 ProjectUsage 内）。"""
     label = usage.project_id if usage.project_id else UNATTRIBUTED_LABEL
     lines.append(f"### 项目：{label}（{usage.settlement_class}）\n")
     lines.append("| kind | meter_type | 事件数 | 用量合计 | 单位 | "
@@ -503,14 +504,17 @@ def weekly_report(events: Iterable[object], *, start: float, end: float,
     lines.append("|---|---:|")
     lines.append(f"| 快照（event.shadow_price 写时快照求和） | "
                  f"{_fmt(sum((u.snapshot_cost for u in usage_all), Decimal(0)))} |")
-    lines.append(f"| 价表（快照未估价事件按 ShadowPriceTable 回填） | {_fmt(table_cost_all)} |")
+    lines.append(f"| 价表（命中 ShadowPriceTable 事件按价表单价×用量全量重估——"
+                 f"对照口径，含快照已估价行） | {_fmt(table_cost_all)} |")
     lines.append("")
     lines.append("## 口径与 [待]")
     lines.append("")
     lines.append("- 快照成本 = Σ quantity × event.shadow_price（005 起写时快照、读时计算；"
                  "影子价格是稀缺度归集口径，非货币承诺）。")
-    lines.append("- 快照与价表两列**分列呈现不混算**：快照未估价（=0 且无 shadow_unit）"
-                 "才按价表回填，命中来源逐行披露。")
+    lines.append("- 快照与价表两列**分列呈现不混算**：快照列=写时快照求和；"
+                 "价表列=命中 ShadowPriceTable 的行一律按「价表单价×用量」全量重估"
+                 "（对照口径，含快照已估价行），未命中价表的行如实标\"未估价\"，"
+                 "命中来源逐行披露。")
     lines.append("- [待] 影子价格表来源档案 resources/ 各档案 shadow_pricing 段——"
                  "首批档案（W-03）尚未声明该段，本报告价表成本多为\"未估价\"属如实呈现。")
     lines.append("- [待] customer 模式结算与首个客户费率卡（company-ops billing/ 注册表，"
