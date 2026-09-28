@@ -70,6 +70,7 @@ class AblationArm:
     name: str
     ref: str          # 如 "promoted:skill:video-cut@v2"（现状）/ "skill:video-cut@v3-candidate"
     behavior: Behavior
+    tenant_id: str = "t0"   # v1.7 §4.1 全对象字段（v2.0 §4.2/D-09 ④；D1-R2 回填）
 
     def __post_init__(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -88,6 +89,7 @@ class PairScore:
     control: float
     treatment: float
     delta: float      # treatment - control
+    tenant_id: str = "t0"   # 继承实验租户（D1-R2 回填）
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,7 @@ class AblationResult:
     p_value: float                    # INCONCLUSIVE 时恒为 1.0（不可判定不报告显著性）
     evidence_ref: str                 # "ablation://<experiment_id>"
     pairs: Tuple[PairScore, ...] = field(default=())
+    tenant_id: str = "t0"             # 继承实验租户（v1.7 §4.1/D-09 ④；D1-R2 回填）
 
     def __post_init__(self) -> None:
         if self.verdict not in ABLATION_VERDICTS:
@@ -126,7 +129,8 @@ class AblationExperiment:
 
     def __init__(self, *, inputs: Sequence[Any], control: AblationArm,
                  treatment: AblationArm, min_samples: int = 10, alpha: float = 0.05,
-                 experiment_id: Optional[str] = None) -> None:
+                 experiment_id: Optional[str] = None,
+                 tenant_id: str = "t0") -> None:   # v1.7 §4.1（D1-R2 回填）
         self._inputs: List[Any] = list(inputs)
         if not isinstance(control, AblationArm) or not isinstance(treatment, AblationArm):
             raise AblationError("control/treatment must be AblationArm instances")
@@ -141,6 +145,7 @@ class AblationExperiment:
         self._min_samples = min_samples
         self._alpha = alpha
         self._experiment_id = experiment_id or uuid.uuid4().hex
+        self._tenant_id = tenant_id
         self._result: Optional[AblationResult] = None
 
     # ── 审计视图 ─────────────────────────────────────────────────────────
@@ -164,6 +169,10 @@ class AblationExperiment:
     @property
     def min_samples(self) -> int:
         return self._min_samples
+
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
 
     @property
     def result(self) -> Optional[AblationResult]:
@@ -200,7 +209,8 @@ class AblationExperiment:
                         first_error = repr(exc)
                     continue
                 pairs.append(PairScore(item_index=idx, control=score_c,
-                                       treatment=score_t, delta=score_t - score_c))
+                                       treatment=score_t, delta=score_t - score_c,
+                                       tenant_id=self._tenant_id))
 
         wins = sum(1 for p in pairs if p.delta > 0)
         losses = sum(1 for p in pairs if p.delta < 0)
@@ -241,5 +251,5 @@ class AblationExperiment:
             n_inputs=n, n_pairs=len(pairs), n_errors=errors,
             wins=wins, ties=ties, losses=losses, mean_delta=mean_delta,
             p_value=p_value, evidence_ref=f"ablation://{self._experiment_id}",
-            pairs=tuple(pairs))
+            pairs=tuple(pairs), tenant_id=self._tenant_id)
         return self._result
