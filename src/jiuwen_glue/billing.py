@@ -62,7 +62,7 @@ def _finite(v: object) -> bool:
     PR#15 纪律：schema 错误不得变形为未归类崩溃）。"""
     try:
         return math.isfinite(v)  # type: ignore[arg-type]
-    except OverflowError:
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
         return False
 
 __all__ = [
@@ -379,7 +379,16 @@ def _in_window(event: object, start: Optional[float], end: Optional[float]) -> b
     # → 原实现使其落入**每一个**窗口，不相交窗重复计费）——duck-typed 装载
     # 路径（aggregate_by_project 的 SimpleNamespace 契约）与行构造同口径
     # fail-closed：拒算而非多计/漏计（billing 不允许含糊）。
-    at = float(getattr(event, "occurred_at", 0.0) or 0.0)
+    # R7/D1 二轮（grok）：float() 转换本身可抛 OverflowError（巨型 int）/
+    # TypeError（datetime 等非数值）/ValueError（不可解析 str）——包转为同一条
+    # schema 错误，不再变形为未归类崩溃（承 PR#15 纪律）。
+    raw = getattr(event, "occurred_at", 0.0) or 0.0
+    try:
+        at = float(raw)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise BillingSchemaError(
+            f"event occurred_at must be a finite epoch to be windowed, "
+            f"got {raw!r}") from exc
     if not math.isfinite(at):
         raise BillingSchemaError(
             f"event occurred_at must be a finite epoch to be windowed, got {at!r}")

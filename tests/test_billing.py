@@ -196,6 +196,25 @@ def test_nonfinite_occurred_at_refused_never_double_counted():
         weekly_report([], start=float("nan"), end=100.0)
 
 
+def test_in_window_unwindowable_types_classified_not_crash():
+    """R7/D1 二轮（grok 交叉红队）：duck 装载路径 occurred_at 为巨型 int /
+    datetime / 不可解析 str 时，float() 转换原会变形为 OverflowError /
+    TypeError / ValueError 未归类崩溃——包转为 BillingSchemaError（schema
+    错误不得变形为未归类崩溃，承 PR#15 纪律）。"""
+    import datetime as _dt
+    bad_ev = lambda occ: SimpleNamespace(   # noqa: E731
+        project_id="proj-x", settlement_class=SETTLEMENT_INTERNAL,
+        kind=KIND_COMPUTE_SECONDS, meter_type=None, quantity=5.0,
+        shadow_price=0, shadow_unit=None, occurred_at=occ)
+    for occ in (10**309, _dt.datetime(2026, 1, 1), "not-a-number"):
+        with pytest.raises(BillingSchemaError, match="finite epoch"):
+            aggregate_by_project([bad_ev(occ)], start=0.0, end=100.0)
+    # 行构造：非数值类型同样按「非有限」归类拒绝（原为未归类 TypeError）
+    with pytest.raises(BillingSchemaError, match="occurred_at"):
+        UsageEventRow(event_id="e-t", kind=KIND_COMPUTE_SECONDS, quantity=1.0,
+                      occurred_at=_dt.datetime(2026, 1, 1))
+
+
 def test_nonfinite_quantity_rejected():
     """R7/D1：inf/巨型 int quantity 经 ``not q >= 0`` 放行（无限量账目）或
     在聚合 float() 时 OverflowError 崩溃——构造期按非有限拒绝。"""

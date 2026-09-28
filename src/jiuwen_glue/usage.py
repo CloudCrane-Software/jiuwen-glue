@@ -45,7 +45,7 @@ def _finite(v: object) -> bool:
     有限同拒（D1-R6 PR#15 纪律：schema 错误不得变形为未归类崩溃）。"""
     try:
         return math.isfinite(v)  # type: ignore[arg-type]
-    except OverflowError:
+    except (OverflowError, TypeError):   # 巨型 int / 非数值类型 → 非有限
         return False
 
 __all__ = [

@@ -26,6 +26,10 @@
 # 验收 R7-D1 三条；src 修复随 #16 并入，本提交补回归钉与棘轮）补 5 用例
 # （challenge 1 + escalation 1 + billing 2 + usage 1），floor 503→508 同轮棘轮
 # （eval-gate 在场口径 509 passed + 0 skipped 实测）。
+# D1-R7 二轮（grok 交叉红队复验）：_in_window duck 路径 float() 转换包转
+# （巨型 int/datetime/垃圾 str 不再 OverflowError/TypeError/ValueError 未归类
+# 崩溃）+ 四模块 _finite 增纳 TypeError（非数值 → 非有限归类拒绝）补 1 用例，
+# floor 508→509 同轮棘轮（eval-gate 在场口径 510 passed + 0 skipped 实测）。
 name: ci
 
 on:
@@ -57,5 +61,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 508 ] || { echo "passed=$N < 508 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 508)"
+          [ "$N" -ge 509 ] || { echo "passed=$N < 509 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 509)"
