@@ -247,3 +247,32 @@ def test_unknown_candidate_query(clock):
     led = PromotionLedger(now=clock)
     with pytest.raises(UnknownPromotionAssetError):
         led.get("nope")
+
+
+def test_score_hook_nonfinite_or_nonnumeric_is_unknown_fail_closed(clock):
+    """R7 修复轮（终局，grok 抽查点 5 落地）：score_hook 返回 NaN/±inf 时
+    ``score < min_score`` 对 NaN 恒 False → min_score 门禁静默放行（与
+    StormGuard ``nan<0`` 同族 fail-open，实测 NaN 分直接 PROMOTED）；巨型 int
+    经 float() OverflowError、非数值 str 经 float() 成功转换后按 0.9 过门——
+    hook 输出异常族（raise/None 既有两态）扩纳非有限与非数值类型：一律
+    GATE_UNKNOWN 弃权拒绝（fail-closed，与 hook 契约「返回数值或 None」一致，
+    数据行投影的 lenient str 口径不适用于可调用 hook）。"""
+    for bad in (float("nan"), float("inf"), float("-inf"), 10**400, "0.9"):
+        led = PromotionLedger(redaction_checker=_redaction_pass,
+                              score_hook=lambda s, b=bad: b, now=clock)
+        cand = _nominate(led)
+        _feed_eval(led, cand.asset_key)
+        led.transition(cand.promotion_id, STAGE_SHORTLIST, reason="ok")
+        led.transition(cand.promotion_id, STAGE_PROMOTED, reason="try")
+        assert cand.stage == STAGE_REJECTED, f"score={bad!r} must not promote"
+        reason = led.history(cand.promotion_id)[-1].reason
+        assert "score" in reason and "UNKNOWN" in reason
+    # 有限分值门禁语义不回退：0.42 < 0.6 仍拒绝（GATE_BLOCKED 路径）
+    led = PromotionLedger(redaction_checker=_redaction_pass,
+                          score_hook=lambda s: 0.42, min_score=0.6, now=clock)
+    cand = _nominate(led)
+    _feed_eval(led, cand.asset_key)
+    led.transition(cand.promotion_id, STAGE_SHORTLIST, reason="ok")
+    led.transition(cand.promotion_id, STAGE_PROMOTED, reason="try")
+    assert cand.stage == STAGE_REJECTED
+    assert "BLOCKED" in led.history(cand.promotion_id)[-1].reason
