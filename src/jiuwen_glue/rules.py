@@ -18,6 +18,12 @@ agent_teams specs，见选型报告 §7.1）:
 - split_task() 校验每个子任务：必须声明独立交付物，且必须满足
   （owner 不同于父任务 = 不同责任）或（声明 depends_on = 明确依赖）；
   同一成员的连续内部步骤被拒绝（铁律 3）。
+- depends_on 声明必须**可核验**：条目须为非空字符串且引用同拆分内真实存在的
+  兄弟标题（自依赖 / 兄弟依赖环 / 标题重复=引用歧义一律拒绝）；核验通过的
+  依赖**落账进 Task.depends_on**（声明不落账 =「明确依赖」分支不可审计）。
+- 拆分租户贯通（v2.0 §4.2 tenant_id 全对象）：子任务继承父任务租户；
+  SubtaskSpec 显式声明异于父租户的租户 = 跨租户拆分，拒绝（TENANT_MISMATCH，
+  对齐 fleet REJECT_TENANT 的租户隔离口径）。
 - 每条违规 = 抛出 IronRuleViolation 子类 + 追加 violation_log（检测 = 拒绝 + 留痕）。
 """
 from __future__ import annotations
@@ -32,6 +38,7 @@ from .errors import (
     Rule1MessageIsNotClaim,
     Rule2ConversationIsNotState,
     Rule3InternalStepIsNotTask,
+    Rule3UnverifiableDependency,
     UnknownTaskError,
 )
 
@@ -95,6 +102,7 @@ class Task:
     run_ref: Optional[str] = None        # 完成时的 TaskRun 引用（协作事实承载）
     artifact_ref: Optional[str] = None   # 完成时的 Artifact 引用
     tenant_id: str = "t0"                # 租户（v1.7 §4.1 全对象字段；单租户起步）
+    depends_on: tuple = ()               # 兄弟子任务标题的显式依赖（split_task 核验后落账）
 
 
 class TaskLedger:
@@ -132,10 +140,12 @@ class TaskLedger:
     def create(self, title: str, *, owner: Optional[str] = None,
                deliverable: Optional[str] = None,
                parent_task_id: Optional[str] = None,
-               tenant_id: str = "t0") -> Task:
+               tenant_id: str = "t0",
+               depends_on: tuple = ()) -> Task:
         task = Task(task_id=uuid.uuid4().hex, title=title, owner=owner,
                     deliverable=deliverable, parent_task_id=parent_task_id,
-                    tenant_id=tenant_id or "t0")
+                    tenant_id=tenant_id or "t0",
+                    depends_on=tuple(depends_on))
         self._tasks[task.task_id] = task
         self.transitions.append({"task_id": task.task_id, "from": None, "to": PENDING,
                                  "source": "admin", "at": self._now(), "by": owner})
@@ -215,12 +225,20 @@ class TaskLedger:
 
     def split_task(self, parent_task_id: str,
                    subtasks: Sequence["SubtaskSpec"]) -> List[Task]:
-        """拆分父任务。违规（内部步骤拆分 / 缺独立交付物）被拒绝并留痕（铁律 3）。
+        """拆分父任务。违规（内部步骤拆分 / 缺独立交付物 / 依赖不可核验 /
+        跨租户拆分）被拒绝并留痕（铁律 3）。
 
         判定：每个子任务必须声明独立交付物；且整个拆分必须表现出
         （不同责任——至少一个子任务 owner 不同于父任务 owner）
         或（明确依赖——至少一个子任务声明 depends_on）；
         否则即"同一成员连续完成的内部步骤"，不得成为任务。
+
+        depends_on 核验（声明不可捏造）：条目须为非空字符串且引用同拆分内
+        真实存在的兄弟标题；自依赖、兄弟依赖环、同拆分内标题重复（按标题
+        引用歧义）一律拒绝；核验通过的依赖落账进各 Task.depends_on。
+
+        租户贯通（v2.0 §4.2）：子任务继承父任务租户；SubtaskSpec.tenant_id
+        显式声明（非 None）异于父租户 = 跨租户拆分 → 拒绝（TENANT_MISMATCH）。
         """
         parent = self.get(parent_task_id)
         if len(subtasks) < 2:
@@ -233,6 +251,51 @@ class TaskLedger:
                     f"subtask {st.title!r} has no independent deliverable")
                 raise self._record_violation(
                     exc, parent_task_id=parent_task_id, title=st.title)
+
+        # 租户贯通：显式声明 ≠ 父租户 → 跨租户拆分，拒绝（拒绝路径零副作用）
+        for st in subtasks:
+            if st.tenant_id is not None and (st.tenant_id or "t0") != parent.tenant_id:
+                exc = IronRuleViolation(
+                    f"subtask {st.title!r} declares tenant {st.tenant_id!r} but "
+                    f"parent task tenant is {parent.tenant_id!r} — cross-tenant "
+                    "split is rejected (tenant isolation)")
+                self.violation_log.append(ViolationRecord(
+                    rule_no=0, code="TENANT_MISMATCH", occurred_at=self._now(),
+                    detail={"parent_task_id": parent_task_id,
+                            "parent_tenant": parent.tenant_id,
+                            "title": st.title, "declared_tenant": st.tenant_id}))
+                raise exc
+
+        # depends_on 核验：条目形状 → 悬空/自依赖 → 依赖环
+        titles = [st.title for st in subtasks]
+        if len(set(titles)) != len(titles):
+            dupes = sorted({t for t in titles if titles.count(t) > 1})
+            exc = Rule3UnverifiableDependency(
+                "duplicate sibling titles make depends_on references ambiguous: "
+                f"{dupes}")
+            raise self._record_violation(exc, parent_task_id=parent_task_id,
+                                         duplicates=dupes)
+        for st in subtasks:
+            for dep in st.depends_on:
+                if not isinstance(dep, str) or not dep.strip():
+                    exc = Rule3UnverifiableDependency(
+                        f"subtask {st.title!r} dependency entry must be a "
+                        f"non-empty string, got {dep!r}")
+                    raise self._record_violation(exc, parent_task_id=parent_task_id,
+                                                 title=st.title, entry=repr(dep))
+                if dep == st.title:
+                    exc = Rule3UnverifiableDependency(
+                        f"subtask {st.title!r} depends on itself")
+                    raise self._record_violation(exc, parent_task_id=parent_task_id,
+                                                 title=st.title)
+                if dep not in titles:
+                    exc = Rule3UnverifiableDependency(
+                        f"subtask {st.title!r} declares dependency on "
+                        f"{dep!r} which is not a sibling title of this split")
+                    raise self._record_violation(exc, parent_task_id=parent_task_id,
+                                                 title=st.title, missing=dep)
+        self._assert_no_dependency_cycle(parent_task_id, subtasks)
+
         same_owner_all = all(st.owner == parent.owner for st in subtasks)
         no_dependency_all = all(not st.depends_on for st in subtasks)
         if same_owner_all and no_dependency_all:
@@ -244,10 +307,42 @@ class TaskLedger:
                 titles=[st.title for st in subtasks], owner=parent.owner)
         created = [
             self.create(st.title, owner=st.owner, deliverable=st.deliverable,
-                        parent_task_id=parent_task_id)
+                        parent_task_id=parent_task_id,
+                        tenant_id=parent.tenant_id,
+                        depends_on=tuple(st.depends_on))
             for st in subtasks
         ]
         return created
+
+    def _assert_no_dependency_cycle(self, parent_task_id: str,
+                                    subtasks: Sequence["SubtaskSpec"]) -> None:
+        """兄弟依赖环检测（A→B→A 等互相等待的死锁拆分）：经校验的引用都指向
+        本拆分内的真实兄弟标题，可在拆分内闭图上做确定性 DFS 判环。
+        检出即 Rule3UnverifiableDependency 拒绝 + violation_log 留痕。"""
+        graph = {st.title: set(st.depends_on) for st in subtasks}
+        state: Dict[str, int] = {}          # 0=visiting, 1=done
+        stack: List[str] = []
+
+        def visit(node: str) -> None:
+            state[node] = 0
+            stack.append(node)
+            for nxt in sorted(graph[node]):
+                if state.get(nxt) == 0:
+                    cycle = stack[stack.index(nxt):] + [nxt]
+                    exc = Rule3UnverifiableDependency(
+                        "sibling dependency cycle (deadlocked split): "
+                        f"{' -> '.join(cycle)}")
+                    raise self._record_violation(
+                        exc, parent_task_id=parent_task_id, cycle=cycle)
+                if nxt not in state:
+                    visit(nxt)
+            stack.pop()
+            state[node] = 1
+
+        for t in sorted(graph):
+            if t not in state:
+                visit(t)
+
 
 
 @dataclass(frozen=True)
@@ -255,5 +350,6 @@ class SubtaskSpec:
     title: str
     deliverable: str
     owner: str
-    depends_on: tuple = ()   # 兄弟子任务标题的显式依赖
-    tenant_id: str = "t0"
+    depends_on: tuple = ()   # 兄弟子任务标题的显式依赖（split_task 核验+落账）
+    tenant_id: Optional[str] = None  # None=继承父任务租户；显式声明≠父租户 → 拒绝
+

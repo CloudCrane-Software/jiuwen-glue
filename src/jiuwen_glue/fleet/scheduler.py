@@ -159,8 +159,15 @@ class TaskOffering:
     def __post_init__(self) -> None:
         if not self.task_ref or not isinstance(self.task_ref, str):
             raise SchedulingError("task_ref must be a non-empty reference")
-        if not isinstance(self.gpu_demand, (int, float)) or \
-                not (0.0 <= float(self.gpu_demand) <= 1.0):
+        if not isinstance(self.gpu_demand, (int, float)):
+            raise SchedulingError(
+                f"gpu_demand must be a float in [0.0, 1.0], got {self.gpu_demand!r}")
+        try:
+            gpu_frac = float(self.gpu_demand)
+        except OverflowError:            # 巨型 int（如 10**400）越出 float 域：
+            raise SchedulingError(       # 归类拒绝，不变形为未归类 OverflowError
+                f"gpu_demand must be a float in [0.0, 1.0], got {self.gpu_demand!r}") from None
+        if not (0.0 <= gpu_frac <= 1.0):
             raise SchedulingError(
                 f"gpu_demand must be a float in [0.0, 1.0], got {self.gpu_demand!r}")
         if isinstance(self.gpu_priority, bool) or \

@@ -98,7 +98,9 @@ class SelectionResult:
 # ── 公式 ─────────────────────────────────────────────────────────────────────
 
 def score(signals: Mapping[str, float]) -> float:
-    """加权求和（纯函数）。信号缺失/多余/越界/非数值 → SelectionRejectedError。"""
+    """加权求和（纯函数）。信号缺失/多余/越界/非数值/越出 float 域 →
+    SelectionRejectedError（巨型 int 的 float() 转换同样归类拒绝，不变形为
+    未归类 OverflowError——D1-R6① schema 错误不漂移纪律）。"""
     if not isinstance(signals, Mapping):
         raise SelectionRejectedError("signals must be a mapping")
     missing = [k for k in SIGNALS if k not in signals]
@@ -110,9 +112,16 @@ def score(signals: Mapping[str, float]) -> float:
     total = 0.0
     for k in SIGNALS:
         v = signals[k]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= float(v) <= 1.0:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise SelectionRejectedError(f"signal {k} must be a number in [0,1], got {v!r}")
-        total += SIGNAL_WEIGHTS[k] * float(v)
+        try:
+            fv = float(v)
+        except OverflowError:            # 巨型 int（如 10**400）越出 float 域
+            raise SelectionRejectedError(
+                f"signal {k} must be a number in [0,1], got {v!r}") from None
+        if not 0.0 <= fv <= 1.0:
+            raise SelectionRejectedError(f"signal {k} must be a number in [0,1], got {v!r}")
+        total += SIGNAL_WEIGHTS[k] * fv
     return round(total, 12)
 
 

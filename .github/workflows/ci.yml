@@ -4,10 +4,10 @@
 # 元资产纪律（PROP-0001 v2.1 §11/§14）：本文件改动强制 owner PR 审（zizmor 常开）。
 # 口径：仓根裸 pytest 全量（testpaths 四件套 = tests/ + providers/e2b_compat +
 # tools/console-tui + tools/spec-gate/tests），floor 断言随上游如实核查回填
-# （只升不降，不许静默放行）；当前 floor=519 对应 D1-R7 修复轮（终局补漏）
-# 本地实测 519 passed + 1 skipped（CI 口径，CI 不装 eval-gate；eval-gate 在场
-# 520 passed + 0 skipped；主包 383 + e2b_compat 41 + console-tui 87 +
-# spec-gate 语义测试 9）。
+# （只升不降，不许静默放行）；当前 floor=527 对应 D1-R8 修复轮（R8 待修清单
+# 域 D1 三条）本地实测 527 passed + 1 skipped（CI 口径，CI 不装 eval-gate；
+# eval-gate 在场 528 passed + 0 skipped；主包 391 + e2b_compat 41 +
+# console-tui 87 + spec-gate 语义测试 9）。
 # D1-R3：spec-gate fail-closed 语义回归钉（空证据维度 BLOCKED 非零退出）自本轮
 # 起随整仓门禁自动跑，不再只靠人工按需运行（验收 D1-R3 Issue#2）。
 # D4-R3：spec-gate --static-only 与全跑同口径（空证据 BLOCKED 非零退出，验收
@@ -58,6 +58,18 @@
 # 的 '>= 0' 声明（消息如实化，零行为变化）。补 2 用例（promotion 1 +
 # registration 1），floor 517→519 同轮棘轮（CI 口径 519 passed + 1 skipped /
 # eval-gate 在场 520 passed + 0 skipped 实测）。
+# D1-R8（R8 待修清单域 D1 三条）：①rules.split_task 租户贯通——子任务继承父
+# 任务租户（此前 create() 未传 tenant_id，父 tenant_id='tA' 的子任务全部落
+# 't0'；SubtaskSpec.tenant_id 声明字段由死字段转正：显式声明≠父租户=跨租户
+# 拆分 → TENANT_MISMATCH 拒绝+留痕，对齐 fleet REJECT_TENANT 与 D1-R4 租约
+# 派生同租户不变式）补 2 用例；②铁律 3 depends_on 声明可核验+落账——悬空
+# 引用/空串真值元组/自依赖/兄弟依赖环/标题重复此前仅作真值判定即放行且声明
+# 整体丢弃（无 DAG 无留痕），现 Rule3UnverifiableDependency 拒绝+violation_log
+# 留痕+Task.depends_on 落账，补 4 用例；③selection.score 与 fleet TaskOffering
+# gpu_demand 巨型 int（10**400）经 float() 变形为未归类 OverflowError——包转
+# 归类为 SelectionRejectedError/SchedulingError（D1-R6① schema 错误不漂移
+# 纪律两处新实例），补 2 用例。共 8 用例，floor 519→527 同轮棘轮（CI 口径
+# 527 passed + 1 skipped 实测；先行红证 8 用例均在修复前树上复现）。
 name: ci
 
 on:
@@ -89,5 +101,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 519 ] || { echo "passed=$N < 519 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 519)"
+          [ "$N" -ge 527 ] || { echo "passed=$N < 527 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 527)"

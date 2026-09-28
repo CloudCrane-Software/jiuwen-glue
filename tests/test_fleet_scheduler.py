@@ -402,3 +402,14 @@ def test_self_pick_ttl_nonfinite_rejected_not_cap_bypass(clock):
     ok = sched.assign(TaskOffering(task_ref="t4"),
                       dispatch=DISPATCH_SELF_PICK, lease_ttl=600)
     assert isinstance(ok, Assignment)
+
+
+# ── D1-R8：巨型 int gpu_demand 拒绝不变形（float(10**400) OverflowError →
+#    SchedulingError；D1-R6①「schema 错误不得变形为未归类崩溃」同款）─────────
+
+def test_task_offering_giant_int_gpu_demand_typed_rejection():
+    """gpu_demand 传 10**400：isinstance((int,float)) 通过但 float(v) 抛
+    OverflowError——必须归类为 SchedulingError（方向本就 fail-closed，
+    修的是错误类型漂移：只捕 SchedulingError 的调度回路不再漏接崩溃）。"""
+    with pytest.raises(SchedulingError):
+        TaskOffering(task_ref="task-1", gpu_demand=10**400)
