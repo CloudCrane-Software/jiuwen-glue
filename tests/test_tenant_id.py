@@ -1,5 +1,6 @@
 # coding: utf-8
-"""tenant_id 全对象字段测试（v1.7 §4.1）：默认 "t0" 与显式覆盖，覆盖既有五模块 + 新六模块."""
+"""tenant_id 全对象字段测试（v1.7 §4.1）：默认 "t0" 与显式覆盖，覆盖既有五模块 + 新六模块
+（D1-R2 补：ablation 四对象——v2.0 §4.2 明列模块）."""
 from __future__ import annotations
 
 import pytest
@@ -101,3 +102,31 @@ def test_new_modules_carry_tenant(clock):
                       chosen="x", rationale_ref="e", tenant_id="t8").tenant_id == "t8"
 
     assert ArtifactRoute("*", "code", "git", tenant_id="t6").tenant_id == "t6"
+
+
+def test_ablation_default_and_explicit_tenant(clock):
+    """ablation 四对象带 tenant_id（v2.0 §4.2/D-09 ④；D1-R2 回填）：
+    Arm 独立默认/覆盖；Experiment→Result→pairs 全链继承实验租户。"""
+    from jiuwen_glue import AblationArm, AblationExperiment
+
+    arm_c = AblationArm(name="control", ref="promoted:skill:video-cut@v2",
+                        behavior=lambda i: 0.5)
+    assert arm_c.tenant_id == "t0"                                  # 默认
+    arm_t = AblationArm(name="treatment", ref="skill:video-cut@v3-candidate",
+                        behavior=lambda i: 0.6, tenant_id="t4")
+    assert arm_t.tenant_id == "t4"                                  # 显式覆盖
+
+    exp = AblationExperiment(inputs=list(range(10)), control=arm_c,
+                             treatment=arm_t, min_samples=10, tenant_id="t4")
+    assert exp.tenant_id == "t4"
+    res = exp.run(lambda item, out: float(out))
+    assert res.tenant_id == "t4"                                    # 结果证据继承
+    assert all(p.tenant_id == "t4" for p in res.pairs)              # 配对分继承
+
+    res0 = AblationExperiment(                                      # 缺省实验 → t0
+        inputs=list(range(10)), control=arm_c,
+        treatment=AblationArm(name="t2", ref="skill:other@v1",
+                              behavior=lambda i: 0.7),
+        min_samples=10).run(lambda item, out: float(out))
+    assert res0.tenant_id == "t0"
+    assert all(p.tenant_id == "t0" for p in res0.pairs)
