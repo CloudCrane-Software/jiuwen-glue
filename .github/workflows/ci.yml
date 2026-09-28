@@ -4,8 +4,8 @@
 # 元资产纪律（PROP-0001 v2.1 §11/§14）：本文件改动强制 owner PR 审（zizmor 常开）。
 # 口径：仓根裸 pytest 全量（testpaths 四件套 = tests/ + providers/e2b_compat +
 # tools/console-tui + tools/spec-gate/tests），floor 断言随上游如实核查回填
-# （只升不降，不许静默放行）；当前 floor=499 对应 D1-R4 修复提交本地实测 499
-# passed（主包 362 + e2b_compat 41 + console-tui 87 + spec-gate 语义测试 9）。
+# （只升不降，不许静默放行）；当前 floor=500 对应 D1-R5 修复提交本地实测 500
+# passed（主包 363 + e2b_compat 41 + console-tui 87 + spec-gate 语义测试 9）。
 # D1-R3：spec-gate fail-closed 语义回归钉（空证据维度 BLOCKED 非零退出）自本轮
 # 起随整仓门禁自动跑，不再只靠人工按需运行（验收 D1-R3 Issue#2）。
 # D4-R3：spec-gate --static-only 与全跑同口径（空证据 BLOCKED 非零退出，验收
