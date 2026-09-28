@@ -132,7 +132,7 @@ def load_red_cases(path: Path) -> list:
 # ── 参考实现与第二独立实现 ────────────────────────────────────────────────────
 
 def reference_aggregate(verdicts):
-    """参考实现 = 冻结契约（semver 1.0.0）的 jiuwen_glue.aggregate（从仓库 src 导入）。"""
+    """参考实现 = 冻结契约（semver 1.0.1，R6/D1 patch bump）的 jiuwen_glue.aggregate（从仓库 src 导入）。"""
     src = str(REPO / "src")
     if src not in sys.path:
         sys.path.insert(0, src)

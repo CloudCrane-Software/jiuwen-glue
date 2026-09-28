@@ -104,9 +104,9 @@
   - 例: 对状态已是 VOID 的 run 再次调用 void -> GuardrailStateError
 - 判定: 结构校验 + tests/test_guardrail.py 对应断言
 
-### REQ-G-08 必填 check 未提交时 gate 为 UNKNOWN 且 missing_required 非空
+### REQ-G-08 必填 check 未提交时 missing_required 非空，无已提交 BLOCKED 则 gate 为 UNKNOWN
 - 规则: run 上存在至少一个 `required` 为 True 且尚未提交的 check 时，`missing_required` 必须包含每一个此类 check_id，因此 `missing_required` 非空。缺交折算为 UNKNOWN **参与同一聚合**而非短路（R6/D1 与 aggregate() 一票否决同序）：已提交 check 中不存在 BLOCKED 时 `gate` 裁决必须为 UNKNOWN；已存在至少一个已提交 check 裁决为 BLOCKED 时 `gate` 裁决必须为 BLOCKED（BLOCKED 吸收——补齐缺交不可能翻转结论）。
-- 依据: guardrail.py:319-325（gate 聚合：missing 折算 UNKNOWN 入参）；guardrail.py:75-93
+- 依据: guardrail.py:320-328（gate 聚合：missing 折算 UNKNOWN 入参）；guardrail.py:75-93
 - 正例:
   - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交且已提交 check 无 BLOCKED 时调用 gate -> UNKNOWN 且 missing_required 含 c1
   - 例: 存在 check_id 为 c1 且 required 为 True 的 check 未提交且另有已提交 check 裁决为 BLOCKED 时调用 gate -> BLOCKED 且 missing_required 含 c1
@@ -119,7 +119,7 @@
 
 ### REQ-G-09 required 为 False 的未提交 check 不阻断聚合
 - 规则: `required` 为 False 且未提交的 check，其 check_id 不得出现在 `missing_required` 中。全部 `required` 为 True 的 check 均已提交且裁决为 PASS 时，仅因另有 `required` 为 False 的 check 未提交，`gate` 的裁决必须为 PASS，且 `missing_required` 必须为空。
-- 依据: guardrail.py:325-328
+- 依据: guardrail.py:327-330
 - 正例:
   - 例: 全部 required 为 True 的 check 已提交且裁决为 PASS，另有 check_id 为 opt 且 required 为 False 的 check 未提交时调用 gate -> PASS 且 missing_required 为空
 - 反例:
