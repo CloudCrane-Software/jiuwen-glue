@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | spec-kit 首模块 | `specs/guardrail.spec.md`、`specs/leases.spec.md` | 逐条可判定 rubric（REQ-xxx 带正反例），格式契约见各文件头 |
 | eval 集 | `evals/guardrail-aggregate/red_cases.jsonl`（+ README） | guardrail 聚合红反例集，`kills_impl` 绑定红证明 |
-| 契约注册表 | `contracts/registry.json` | `(ref, semver) → sha256[实现文件]`，首条 `jiuwen_glue.guardrail.aggregate@0.3.0` |
+| 契约注册表 | `contracts/registry.json` | `(ref, semver) → sha256[实现文件]`，首条 `jiuwen_glue.guardrail.aggregate@1.0.0`（0.3.0→1.0.0 breaking bump = R5/D1 非规范值收敛 UNKNOWN） |
 | 契约 hash 秒检 | `tools/check_contracts.py` | G7 快检半边，秒级、纯标准库、fail-closed |
 | 元门禁六维 | `tools/spec-gate/spec_gate.py` | §5.2 入库门禁首跑工具（四维实现；D3 原口径/D6 空证据 = BLOCKED 非零退出，不放行——D4-R2 修复） |
 | 择优骨架 | `src/jiuwen_glue/selection.py`（`line.selection`） | §5.4 纯机器信号公式 + winner_ref；N>5 护栏；R1 平局豁免 |

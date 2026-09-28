@@ -1,14 +1,14 @@
 # Spec: jiuwen_glue.guardrail.aggregate（聚合语义 + 逐条可判定 rubric）
 
 - ref: jiuwen_glue.guardrail.aggregate
-- semver: 0.3.0
+- semver: 1.0.0
 - 实现文件: src/jiuwen_glue/guardrail.py
 - 来源: 建设方案 v2.0 §5.2（资产层：spec = 逐条可判定 rubric，REQ-xxx 带正反例）
-- 基线: main（含 W-01 缺陷#2 修复：聚合空集 fail-closed）
+- 基线: main（含 W-01 缺陷#2 修复：聚合空集 fail-closed；**1.0.0 = R5/D1 修复：非规范判定值收敛 UNKNOWN**——0.3.0 的 `aggregate(["junk"]) == PASS` 是 fail-open 边界，违反原则 2，breaking bump）
 
 ## 机器可读例格式约定
 
-- REQ-G-01 至 REQ-G-04 的每条例行必须是单行，且全等匹配：`- 例: aggregate(<列表字面量>) -> <裁决>`。`<裁决>` 只能是 `PASS`、`BLOCKED`、`UNKNOWN` 三者之一。`<列表字面量>` 只能是 `[]`，或由 `PASS`、`BLOCKED`、`UNKNOWN` 组成的列表；多个元素之间用逗号加一个空格分隔。
+- REQ-G-01 至 REQ-G-04 与 REQ-G-14 的每条例行必须是单行，且全等匹配：`- 例: aggregate(<列表字面量>) -> <裁决>`。`<裁决>` 只能是 `PASS`、`BLOCKED`、`UNKNOWN` 三者之一。`<列表字面量>` 只能是 `[]`，或由 `PASS`、`BLOCKED`、`UNKNOWN` 组成的列表，或（仅 REQ-G-14）由带引号的任意字符串组成的列表；多个元素之间用逗号加一个空格分隔。
 - 上述正例：该列表入参的实际返回值必须与箭头右侧全等。上述反例：该列表入参的实际返回值不得与箭头右侧全等。判定深度 = 机器执行（spec-gate 与 CI 环节9 对冻结契约实现逐条断言）。
 - REQ-G-05 至 REQ-G-13 的每条例行必须是单行，且匹配：`- 例: <场景> -> <期望>`。场景与期望均非空，两侧内部不得再出现 ` -> `。判定深度 = 结构校验 + tests/test_guardrail.py 对应断言。
 - 裁决词只使用大写的 `PASS`、`BLOCKED`、`UNKNOWN`。正例给出实现必须达到的终态，反例给出实现不得产生的终态。
@@ -17,7 +17,7 @@
 
 ### REQ-G-01 空列表聚合为 UNKNOWN
 - 规则: `aggregate` 的入参为空列表时，返回值必须为 UNKNOWN。空列表的返回值不得为 PASS。
-- 依据: guardrail.py:75-91；建设方案 v2.0 §3.2；W-01 缺陷#2
+- 依据: guardrail.py:75-93；建设方案 v2.0 §3.2；W-01 缺陷#2
 - 正例:
   - 例: aggregate([]) -> UNKNOWN
 - 反例:
@@ -26,7 +26,7 @@
 
 ### REQ-G-02 任一 BLOCKED 聚合为 BLOCKED
 - 规则: 入参列表中只要有一个元素为 BLOCKED，`aggregate` 必须返回 BLOCKED。列表中同时存在 UNKNOWN 或 PASS 时，返回值仍必须为 BLOCKED。
-- 依据: guardrail.py:75-91
+- 依据: guardrail.py:75-93
 - 正例:
   - 例: aggregate([BLOCKED]) -> BLOCKED
   - 例: aggregate([BLOCKED, UNKNOWN]) -> BLOCKED
@@ -42,7 +42,7 @@
 
 ### REQ-G-03 无 BLOCKED 且存在 UNKNOWN 时聚合为 UNKNOWN
 - 规则: 入参列表中不存在 BLOCKED，且至少存在一个 UNKNOWN 时，`aggregate` 必须返回 UNKNOWN。
-- 依据: guardrail.py:75-91
+- 依据: guardrail.py:75-93
 - 正例:
   - 例: aggregate([UNKNOWN]) -> UNKNOWN
   - 例: aggregate([PASS, UNKNOWN]) -> UNKNOWN
@@ -57,7 +57,7 @@
 
 ### REQ-G-04 全部元素为 PASS 时聚合为 PASS
 - 规则: 入参列表非空，且每一个元素都是 PASS 时，`aggregate` 必须返回 PASS。
-- 依据: guardrail.py:75-91
+- 依据: guardrail.py:75-93
 - 正例:
   - 例: aggregate([PASS]) -> PASS
   - 例: aggregate([PASS, PASS]) -> PASS
@@ -176,3 +176,14 @@
   - 例: 调用 create_run(spec) -> run 绑定的 spec 与入参 spec 对象标识相同
   - 例: create_run(spec) 返回后把入参 spec 中首个 check 的 required 从 True 改为 False -> run 绑定 spec 中该 check 的 required 为 False
 - 判定: 结构校验 + tests/test_guardrail.py 对应断言
+
+### REQ-G-14 非规范判定值聚合为 UNKNOWN（不落默认分支放行）
+- 规则: 入参列表中不存在 BLOCKED，且至少存在一个既非 PASS 也非 BLOCKED 的值（一切非规范字符串，含小写变体、带空白、空串；R5/D1 修复前此类值落入默认分支返回 PASS——fail-open）时，`aggregate` 必须返回 UNKNOWN。与 BLOCKED 并存时仍必须返回 BLOCKED（一票否决优先）。
+- 依据: guardrail.py:75-93；建设方案 v2.0 原则 2（Fail-closed 无例外）；R5/D1 修复（与 eval-gate gate.aggregate coerce→UNKNOWN 语义对齐）
+- 正例:
+  - 例: aggregate(["junk"]) -> UNKNOWN
+  - 例: aggregate(["PASS", "junk"]) -> UNKNOWN
+- 反例:
+  - 例: aggregate(["junk"]) -> PASS
+  - 例: aggregate(["junk", "BLOCKED"]) -> UNKNOWN
+- 判定: 逐条执行本条正例与反例的 `aggregate` 调用。正例的实际返回值必须与箭头右侧全等。反例的实际返回值不得与箭头右侧全等。tests/test_guardrail.py 另有大小写/空白/None 变体断言。

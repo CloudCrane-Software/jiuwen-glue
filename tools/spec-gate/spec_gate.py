@@ -96,16 +96,19 @@ def parse_spec(path: Path) -> dict:
         m = AGG_EX_RE.match(line)
         if m and section in ("pos", "neg"):
             try:
-                # 裁决词是裸大写词（PASS/BLOCKED/UNKNOWN），先加引号再 literal_eval
-                quoted = re.sub(r"\b(PASS|BLOCKED|UNKNOWN)\b", r'"\1"', m.group(1))
+                # 裁决词是裸大写词（PASS/BLOCKED/UNKNOWN），先加引号再 literal_eval；
+                # 已带引号的词不重复加引（REQ-G-14 非规范值例：["PASS", "junk"]）。
+                quoted = re.sub(r'(?<!["\w])(PASS|BLOCKED|UNKNOWN)(?!["\w])', r'"\1"', m.group(1))
                 inp = ast.literal_eval(quoted)
             except (ValueError, SyntaxError):
                 spec["parse_errors"].append(f"{path.name}:{lineno} 列表字面量不可解析: {m.group(1)}")
                 continue
-            bad = [v for v in inp if v not in VERDICTS]
+            # 输入域：裸大写词 ∈ VERDICTS（REQ-G-01..04），或带引号任意字符串（仅
+            # REQ-G-14 非规范判定值例——literal_eval 后为 str 即来自源内引号）。
+            bad = [v for v in inp if v not in VERDICTS and not isinstance(v, str)]
             if bad:
                 spec["parse_errors"].append(
-                    f"{path.name}:{lineno} 输入域越界（{bad}）: 只允许 PASS/BLOCKED/UNKNOWN")
+                    f"{path.name}:{lineno} 输入域越界（{bad}）: 只允许 PASS/BLOCKED/UNKNOWN 或带引号字符串（REQ-G-14）")
                 continue
             cur[section].append({"input": inp, "expect": m.group(2), "line": lineno})
             continue
@@ -129,7 +132,7 @@ def load_red_cases(path: Path) -> list:
 # ── 参考实现与第二独立实现 ────────────────────────────────────────────────────
 
 def reference_aggregate(verdicts):
-    """参考实现 = 冻结契约（semver 0.3.0）的 jiuwen_glue.aggregate（从仓库 src 导入）。"""
+    """参考实现 = 冻结契约（semver 1.0.0）的 jiuwen_glue.aggregate（从仓库 src 导入）。"""
     src = str(REPO / "src")
     if src not in sys.path:
         sys.path.insert(0, src)
@@ -138,20 +141,22 @@ def reference_aggregate(verdicts):
 
 
 def second_aggregate(verdicts):
-    """第二独立实现（D1）：按 specs/guardrail.spec.md 的 REQ-G-01..04 独立编码——
-    折叠（fold）写法，与参考实现（any() 扫描）不同构；语义一致性正是 D1 要验证的对象。"""
+    """第二独立实现（D1）：按 specs/guardrail.spec.md 的 REQ-G-01..04 + REQ-G-14 独立编码——
+    折叠（fold）写法，与参考实现（any() 扫描）不同构；语义一致性正是 D1 要验证的对象。
+    REQ-G-14（R5/D1，契约 1.0.0）：非规范值（既非 PASS 也非 BLOCKED）= 信息不足 → UNKNOWN，
+    绝不落默认分支返回 PASS（fold 初值虽为 PASS，但任何非规范元素折叠后即 UNKNOWN）。"""
     from functools import reduce
 
     def fold(acc, v):
         if acc == "BLOCKED" or v == "BLOCKED":
             return "BLOCKED"
-        if acc == "UNKNOWN" or v == "UNKNOWN":
-            return "UNKNOWN"
+        if acc == "UNKNOWN" or v not in ("PASS", "BLOCKED"):
+            return "UNKNOWN"      # UNKNOWN 与一切非规范值（REQ-G-14）→ UNKNOWN
         return "PASS"
     vs = list(verdicts)
     if not vs:
         return "UNKNOWN"          # REQ-G-01：空集=信息不足
-    return reduce(fold, vs, "PASS")  # REQ-G-02/03/04：BLOCKED 压 UNKNOWN 压 PASS
+    return reduce(fold, vs, "PASS")  # REQ-G-02/03/04/14：BLOCKED 压 UNKNOWN 压 PASS
 
 
 # ── 变异体（D2b：规则变异——对 spec 的似真误读，逐一实现成错误 aggregate）──────
@@ -529,8 +534,8 @@ def render_report(gspec, lspec, red_cases, static_errors, d1, d2, d3, d4, d5, d6
     L.append("| --- | --- |")
     L.append("| 生成 | `python tools/spec-gate/spec_gate.py`（W-05 首跑，纯标准库零依赖） |")
     L.append("| 对象 | specs/guardrail.spec.md（REQ×{}）+ specs/leases.spec.md（REQ×{}）+ evals/guardrail-aggregate/red_cases.jsonl（红反例×{}） |".format(len(gspec["reqs"]), len(lspec["reqs"]), len(red_cases)))
-    L.append("| 契约锚点 | jiuwen_glue.guardrail.aggregate @ 0.3.0（contracts/registry.json 首条） |")
-    L.append("| 参考实现 | src/jiuwen_glue/guardrail.py::aggregate（冻结契约，main 7895c23 含 W-01 修复） |")
+    L.append("| 契约锚点 | jiuwen_glue.guardrail.aggregate @ 1.0.0（contracts/registry.json 首条；0.3.0→1.0.0 breaking bump = R5/D1 非规范值收敛 UNKNOWN） |")
+    L.append("| 参考实现 | src/jiuwen_glue/guardrail.py::aggregate（冻结契约 1.0.0；含 W-01 修复与 R5/D1 非规范值修复） |")
     L.append("| 静态一致性 | {} |".format("通过" if not static_errors else "**失败（见文末）**"))
     L.append("")
     L.append("## 六维总览")
