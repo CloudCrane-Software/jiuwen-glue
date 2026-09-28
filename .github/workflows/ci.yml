@@ -16,7 +16,7 @@
 # D1-R5：aggregate 非法判定值收敛 UNKNOWN（fail-closed 无例外，验收 D1-R5 #1）
 # 补 1 用例，floor 499→500 同轮棘轮。另有双聚合一致性回归 1 例
 # （test_aggregate_matches_eval_gate_reference）需 eval-gate 在场，CI 不装则
-# skip（本地 501 passed + 1 skipped / CI 500 passed + 1 skipped）——floor 按
+# skip（eval-gate 在场 501 passed + 0 skipped / CI 不装 500 passed + 1 skipped，实测两种口径）——floor 按
 # CI 口径 500 计，skip 不计入 passed（eval-gate README 偏差登记行 R5 订正句）。
 name: ci
 
