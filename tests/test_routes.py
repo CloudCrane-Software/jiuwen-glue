@@ -104,3 +104,18 @@ def test_gpu_frac_scheduling_predicate():
     assert not cpu_only.can_take(needs_gpu=True)
     assert gpu_half.can_take(needs_gpu=True)
     assert gpu_half.can_take(needs_gpu=False)              # CPU 任务也可跑
+
+
+# ── D1-R8 二批（grok 红队草稿属实线索）：份额字段巨型 int 经 float() 变形为未归类
+#    OverflowError → 归类 CapacitySchemaError；bool 不再冒充 1.0 全额份额
+#    （与 fleet ResourcePressure / TaskOffering.gpu_priority / score() 同口径）──
+
+def test_node_capacity_frac_giant_int_and_bool_typed_rejection():
+    with pytest.raises(CapacitySchemaError):
+        NodeCapacity(node_id="n", gpu_frac=10**400)
+    with pytest.raises(CapacitySchemaError):
+        NodeCapacity(node_id="n", cpu_frac=10**400)
+    with pytest.raises(CapacitySchemaError):
+        NodeCapacity(node_id="n", gpu_frac=True)
+    with pytest.raises(CapacitySchemaError):
+        NodeCapacity(node_id="n", cpu_frac=False)

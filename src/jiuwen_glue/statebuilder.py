@@ -125,7 +125,9 @@ class PlacementOption:
             raise StateBuilderError(
                 f"placement option requires 'option_id', got keys "
                 f"{sorted(raw.keys())}") from None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError（D1-R8 二批）：巨型 int score 越出 float 域与垃圾
+            # 类型/值同款归类 StateBuilderError，不未归类泄漏
             raise StateBuilderError(
                 f"placement option score must be a number, got "
                 f"{raw.get('score')!r}") from None

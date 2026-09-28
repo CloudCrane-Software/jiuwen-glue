@@ -219,6 +219,38 @@ def test_out_of_range_confidence_and_nonfinite_score_refused(clock):
     assert log.all() == []
 
 
+# ── D1-R8 二批（grok 红队草稿属实线索）：巨型 int 经 float()/math.isfinite 变形为
+#    未归类 OverflowError——声明面归类 JevBackendError、运行面归类 refuse
+#    （D1-R6①「schema 错误不得变形为未归类崩溃」纪律四站点收口）───────────────
+
+def test_giant_int_rule_decl_typed_rejection_not_overflow():
+    """声明面：classify confidence / score value 传 10**400 → JevBackendError
+    （此前 isinstance 通过后 float(10**400) OverflowError 未归类崩溃）。"""
+    with pytest.raises(JevBackendError):
+        RuleBasedBackend([
+            {"primitive": "classify", "when": {}, "label": "other",
+             "confidence": 10**400, "rationale_ref": "r"},
+        ])
+    with pytest.raises(JevBackendError):
+        RuleBasedBackend([
+            {"primitive": "score", "when": {}, "value": 10**400,
+             "rubric": SCORE_RUBRIC_PROMOTION, "rationale_ref": "r"},
+        ])
+
+
+def test_giant_int_backend_outcomes_refused_not_crash(clock):
+    """运行面：后端返回 10**400 confidence/value → 走既有 refuse 语义
+    （None + refusals 留痕），不变形为未归类 OverflowError 崩溃。"""
+    log = DecisionLog(now=clock)
+    layer = _layer({"classify": _ConstBackend(confidence=10**400),
+                    "score": _ConstBackend(value=10**400)}, log=log, clock=clock)
+    assert layer.classify({"x": 1}, LABELS) is None
+    assert "confidence" in layer.refusals[-1].reason
+    assert layer.score({"x": 1}, "r") is None
+    assert "non-finite/non-numeric" in layer.refusals[-1].reason
+    assert log.all() == []
+
+
 def test_malformed_call_arguments_raise_loudly(clock):
     """调用方参数不合法 = 调用方 bug，大声失败（不算"无法判定"）。"""
     layer = _layer({"classify": _ConstBackend()})

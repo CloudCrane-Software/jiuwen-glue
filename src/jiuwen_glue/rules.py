@@ -251,6 +251,15 @@ class TaskLedger:
                     f"subtask {st.title!r} has no independent deliverable")
                 raise self._record_violation(
                     exc, parent_task_id=parent_task_id, title=st.title)
+        # 标题形状校验（D1-R8 二批）：标题是 depends_on 的引用键与查重键——
+        # 非字符串（静默建账 int 标题）/不可哈希（查重处未归类 TypeError）/
+        # 空串或纯空白一律归类拒绝（schema 错误不变形为未归类崩溃）
+        for st in subtasks:
+            if not isinstance(st.title, str) or not st.title.strip():
+                exc = Rule3UnverifiableDependency(
+                    f"subtask title must be a non-empty string, got {st.title!r}")
+                raise self._record_violation(exc, parent_task_id=parent_task_id,
+                                             title=repr(st.title))
 
         # 租户贯通：显式声明 ≠ 父租户 → 跨租户拆分，拒绝（拒绝路径零副作用）
         for st in subtasks:

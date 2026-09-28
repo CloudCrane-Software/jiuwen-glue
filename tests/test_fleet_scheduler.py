@@ -413,3 +413,12 @@ def test_task_offering_giant_int_gpu_demand_typed_rejection():
     修的是错误类型漂移：只捕 SchedulingError 的调度回路不再漏接崩溃）。"""
     with pytest.raises(SchedulingError):
         TaskOffering(task_ref="task-1", gpu_demand=10**400)
+
+
+def test_task_offering_bool_gpu_demand_rejected():
+    """gpu_demand=True 不再冒充 1.0 全额 GPU 需求（本模块自身约定：兄弟字段
+    gpu_priority 与 selection.score() 均显式排除 bool，构造器口径对齐）。"""
+    with pytest.raises(SchedulingError):
+        TaskOffering(task_ref="task-1", gpu_demand=True)
+    with pytest.raises(SchedulingError):
+        TaskOffering(task_ref="task-1", gpu_demand=False)

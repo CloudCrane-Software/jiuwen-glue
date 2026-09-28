@@ -222,3 +222,29 @@ def test_rule3_valid_dependency_is_persisted(clock):
     ])
     assert ok[0].depends_on == ()
     assert ok[1].depends_on == ("导出",)
+
+
+# ── D1-R8 二批（grok 红队草稿属实线索）：标题形状校验——非字符串标题此前静默
+#    建账（title=123）、不可哈希标题（list）在标题查重处变形为未归类 TypeError、
+#    空串/纯空白标题此前放行——一律归类拒绝（schema 错误不漂移纪律）──────────
+
+def test_rule3_title_shape_is_validated(clock):
+    from jiuwen_glue import Rule3UnverifiableDependency
+
+    led = TaskLedger(now=clock)
+    parent = led.create("标题形状", owner="a")
+    for bad in (123, "", "   "):
+        with pytest.raises(Rule3UnverifiableDependency):
+            led.split_task(parent.task_id, [
+                SubtaskSpec(title=bad, deliverable="d1", owner="x"),
+                SubtaskSpec(title="b", deliverable="d2", owner="y"),
+            ])
+    # 不可哈希标题（list）：归类拒绝而非查重处未归类 TypeError
+    with pytest.raises(Rule3UnverifiableDependency):
+        led.split_task(parent.task_id, [
+            SubtaskSpec(title=["x"], deliverable="d1", owner="x"),
+            SubtaskSpec(title="b", deliverable="d2", owner="y"),
+        ])
+    # 拒绝路径零副作用
+    assert not [t for t in led._tasks.values()
+                if t.parent_task_id == parent.task_id]

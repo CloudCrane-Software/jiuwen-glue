@@ -247,3 +247,27 @@ def test_shadow_works_under_best_fit_policy_and_rejects_untouched(clock):
                       ledger=None, policy=SCHED_POLICY_GREEDY,
                       shadow_fefo=pressures)
     assert isinstance(rejected, Rejected)
+
+
+# ── D1-R8 二批（grok 红队草稿属实线索）：FEFO 输入面巨型 int 拒绝不变形 ──────
+
+def test_resource_pressure_giant_int_typed_rejection():
+    """ResourcePressure 份额声明传 10**400 → SchedulingError
+    （此前 isinstance 通过后 float() OverflowError 未归类崩溃）。"""
+    with pytest.raises(SchedulingError):
+        ResourcePressure(node_id="n", weekly_remaining_ratio=10**400)
+    with pytest.raises(SchedulingError):
+        ResourcePressure(node_id="n", window_5h_remaining=10**400)
+
+
+def test_pressures_giant_int_ratio_falls_through_not_crash():
+    """W-03 外部计量行 remaining_ratio=10**400：越出 float 域 → 与越界有限值
+    同款回落 value 换算路径（直读行弃用），不变形为未归类 OverflowError。"""
+    rows = [{"resource": "cnb-sandbox", "window_id": "weekly-2026W39",
+             "remaining_ratio": 10**400, "value": 400.0,
+             "ts": "2026-09-28T10:00:00+08:00", "source": "cnb_api",
+             "meter_type": "cnb_core_hours"}]
+    limits = {"cnb-sandbox": {"weekly": 1600.0}}
+    pressures = pressures_from_meter_rows(rows, limits=limits, now=123.0)
+    assert pressures["cnb-sandbox"].weekly_remaining_ratio == pytest.approx(
+        1 - 400.0 / 1600.0)
