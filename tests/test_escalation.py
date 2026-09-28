@@ -221,6 +221,16 @@ def test_time_budget_must_be_declared(ledger):
     assert esc.added_context == () and esc.added_tools == ()
 
 
+def test_time_budget_must_be_finite(ledger):
+    """R7/D1：NaN/±inf 经 ``nan <= 0`` 恒 False 静默入账——『升级必须显式声明
+    正时间预算』闸 fail-open；与 D1-R6 已加固的 StormGuard 两浮点参数同口径
+    拒绝（巨型 int 不变形为 OverflowError 未归类崩溃）。"""
+    for bad in (float("nan"), float("inf"), 10**309):
+        with pytest.raises(EscalationSchemaError):
+            ledger.escalate("wo-610", BLOCKER, time_budget_seconds=bad)
+    assert ledger.case_of("wo-610").history == []        # 拒绝不落账
+
+
 # ── 人类就绪包（四件套）───────────────────────────────────────────────────────
 
 def _ready_task(task_ref="wo-700", category=HARD_IRREVERSIBLE, facts=True, rev=True):

@@ -21,6 +21,11 @@
 # D1-R6：gate() 必填缺交折算 UNKNOWN 参与聚合（不短路掩盖已提交 BLOCKED，
 # 验收 R6-D1 #1）补 3 用例（guardrail 2 + admission 1），floor 500→503 同轮棘轮
 # （eval-gate 在场口径 504 passed + 0 skipped 实测）。
+# D1-R7：非有限数值闸三处同口径收口（challenge ttl / billing+usage occurred_at
+# 与 quantity / escalate time_budget_seconds——NaN/±inf/巨型 int fail-open，
+# 验收 R7-D1 三条；src 修复随 #16 并入，本提交补回归钉与棘轮）补 5 用例
+# （challenge 1 + escalation 1 + billing 2 + usage 1），floor 503→508 同轮棘轮
+# （eval-gate 在场口径 509 passed + 0 skipped 实测）。
 name: ci
 
 on:
@@ -52,5 +57,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 503 ] || { echo "passed=$N < 503 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 503)"
+          [ "$N" -ge 508 ] || { echo "passed=$N < 508 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 508)"

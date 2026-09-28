@@ -174,6 +174,36 @@ def test_aggregate_by_project_tenant_isolation():
     assert "### 项目：proj-x（internal，租户 t2）" in report
 
 
+def test_nonfinite_occurred_at_refused_never_double_counted():
+    """R7/D1：occurred_at 非有限（NaN/±inf/巨型 int）落进**每一个**半开窗
+    （nan 与一切比较均 False）→ 不相交窗同一笔重复计费，「可重算」不变式
+    破缺。行构造与 duck-typed 归集路径（SimpleNamespace 契约）同口径
+    fail-closed：拒算而非多计（billing 不允许含糊）。"""
+    for bad in (float("nan"), float("inf"), 10**309):
+        with pytest.raises(BillingSchemaError, match="occurred_at"):
+            _ev("bad-occ", 1, occurred_at=bad)
+    nan_ev = SimpleNamespace(
+        project_id="proj-x", settlement_class=SETTLEMENT_INTERNAL,
+        kind=KIND_COMPUTE_SECONDS, meter_type=None, quantity=5.0,
+        shadow_price=0, shadow_unit=None, occurred_at=float("nan"))
+    for start, end in ((0.0, 100.0), (100.0, 200.0)):    # 两个不相交窗口
+        with pytest.raises(BillingSchemaError, match="finite epoch"):
+            aggregate_by_project([nan_ev], start=start, end=end)
+    with pytest.raises(BillingSchemaError, match="finite"):
+        weekly_report([nan_ev], start=0, end=100)        # 周报同闸拒算
+    # 周报窗口边界非有限：end<=start 对 NaN 恒 False 的静默放行同收口
+    with pytest.raises(BillingSchemaError, match="finite"):
+        weekly_report([], start=float("nan"), end=100.0)
+
+
+def test_nonfinite_quantity_rejected():
+    """R7/D1：inf/巨型 int quantity 经 ``not q >= 0`` 放行（无限量账目）或
+    在聚合 float() 时 OverflowError 崩溃——构造期按非有限拒绝。"""
+    for bad in (float("inf"), 10**309):
+        with pytest.raises(BillingSchemaError, match="quantity"):
+            _ev("bad-q", bad, occurred_at=10)
+
+
 # ── 影子价表（resources/ 档案投影）────────────────────────────────────────────
 
 def test_shadow_price_table_from_profiles_conflict_and_lookup():
