@@ -8,6 +8,7 @@
 最小语义（本实现）:
 - **发放 grant**：发一笔 ACTIVE 租约；可指定 ttl（expires_at）；可从父租约派生
   （派生额从父剩余额中划出，父 remaining 相应扣减——"随子任务派生"）。
+  派生**必须同租户**：显式声明他租 tenant_id 被拒绝；未声明则继承父租约租户。
 - **占用 acquire**：按 cost 扣减 remaining。租约必须 ACTIVE 且未过期；
   超额占用被拒绝（BudgetExceededError）；耗尽 → EXHAUSTED。
 - **过期 expire**：到达 expires_at 的租约在触碰时惰性转 EXPIRED；也可显式 expire。
@@ -125,11 +126,17 @@ class BudgetLedger:
         *,
         parent_lease_id: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
-        tenant_id: str = "t0",
+        tenant_id: Optional[str] = None,
         agent_ref: Optional[str] = None,
         effective_perms: Optional[EffectivePerms] = None,
     ) -> BudgetLease:
         """发放租约。parent_lease_id 给出时为"随子任务派生"：额度从父剩余中划出。
+
+        租户边界（D1-R4）：派生**必须同租户**——``tenant_id`` 显式给出且与父租约
+        tenant_id 不同 → LeaseDerivationError + GRANT_REJECTED 留痕（跨租户派生
+        会把 tA 父剩余划给 tB 子租约，属静默越权转移）；未给出（None）时子租约
+        **继承父租约租户**（"随子任务派生"语义：子任务与父任务同属一方）。
+        无父派生（根发放）未给出时仍默认 "t0"。
 
         权限交集联动（v1.7 §12.5）：
         - ``effective_perms`` 给出时（identity.effective_permissions 的求值结果），
@@ -154,6 +161,20 @@ class BudgetLedger:
                           reason=f"parent not ACTIVE (status={parent.status})")
                 raise LeaseDerivationError(
                     f"parent lease {parent.lease_id} is {parent.status}, cannot derive")
+            # 租户边界（D1-R4）：派生必须同租户；显式声明他租 → 拒绝 + 留痕。
+            # 校验先于额度划扣（拒绝路径零副作用，父剩余不动）。
+            if tenant_id is not None and tenant_id != parent.tenant_id:
+                self._log(parent.lease_id, "GRANT_REJECTED",
+                          reason="cross-tenant derivation (derived lease must "
+                                 "stay in parent tenant)",
+                          parent_tenant=parent.tenant_id,
+                          requested_tenant=tenant_id)
+                raise LeaseDerivationError(
+                    f"cross-tenant derivation rejected: requested tenant "
+                    f"{tenant_id!r} != parent lease {parent.lease_id} tenant "
+                    f"{parent.tenant_id!r}")
+            if tenant_id is None:
+                tenant_id = parent.tenant_id        # 未声明 → 继承父租约租户
             if amount > parent.remaining:
                 self._log(parent.lease_id, "GRANT_REJECTED",
                           reason="derivation exceeds parent remaining",
