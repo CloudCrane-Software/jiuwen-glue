@@ -44,7 +44,7 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 ```bash
 pip install -e .          # 或 uv pip install -e .
-python -m pytest          # 整仓 495 项测试，全离线（无需数据库/网络）：主包 tests/ 360 + providers/e2b_compat 41 + tools/console-tui 87 + tools/spec-gate/tests 7（2026-09-28 D6-R2 @ bc12adf 实测 486/358；D1-R2 补 ablation tenant 用例后 487/359；D1-R3 billing 归集租户隔离修复补 1 例并纳入 spec-gate 语义测试 7 例后 495/360；testpaths 已含四件套，子包亦可各自独立 pytest）
+python -m pytest          # 整仓 499 项测试，全离线（无需数据库/网络）：主包 tests/ 362 + providers/e2b_compat 41 + tools/console-tui 87 + tools/spec-gate/tests 9（2026-09-28 D6-R2 @ bc12adf 实测 486/358；D1-R2 补 ablation tenant 用例后 487/359；D1-R3 billing 归集租户隔离修复补 1 例并纳入 spec-gate 语义测试 7 例后 495/360；D4-R3 语义回归钉 7→9 后 497（同提交未同步本行，本轮补记）；D1-R4 租约派生同租户不变式补 2 例后 499/362；testpaths 已含四件套，子包亦可各自独立 pytest）
 ```
 
 ```python
@@ -96,7 +96,7 @@ assert result.executable          # fail-closed：只有 PASS 为 True
 | **escalation 升级阶梯 + 裁决卡**（v2.1 W-06） | 六级阶梯单步推进 + 人类就绪包四件套 + L4→L5 硬闸（就绪包签名==blocker 签名）+ 风暴防护三防线（级内总量上限/最小步进间隔/签名去重）+ TUI AdjudicationCard（y=approve fail-closed / e=escalate 打回 L3） | `src/jiuwen_glue/escalation.py`；`tools/console-tui/`（裁决卡） | 23 项（glue 侧） | v2.1 §4.7；报告 §W-06 |
 | **Wave2 分支模块（已并 main）** | platform_tokens 铸造器（TTL≤1h/禁缓存禁代签，W-09，22 例）经 3342fc0 并入；billing 结算（W-07，14 例）经 6ec8807 并入；TUI timeline（W-11）经 88e93f9 并入——**三者均已在 main，用例计入上述计数**。〔勘误 2026-09-28 D6-R2〕收口提交 bc12adf 曾沿用合并前 ae23962 树的实测数并误标"均未并入 main"，与本树事实不符，已按 bc12adf 树重测更正 | `src/jiuwen_glue/`（billing.py / platform_tokens.py）；`tools/console-tui/`（timeline） | 已计入（主包 360 / tui 87） | v2.1 报告 ⑤.1/⑥F；三分支并入 main=6ec8807(billing)/3342fc0(w09)/88e93f9(w11)，可 `git merge-base --is-ancestor` 复核（CNB 台账行 8e431b26 的收口 SQL 在 company-ops `ops/sql/009`〔待应用〕，勿以台账现态判断合并与否） |
 
-合并态整仓 `python -m pytest` 495 项全绿（2026-09-28 D6-R2 @ bc12adf 实测 486/358，D1-R2 补 ablation tenant 用例 +1 后复测 487，D1-R3 billing 归集租户隔离修复补 1 例 + 纳入 spec-gate 语义测试 7 例后复测 495 @ D1-R3 修复提交：主包 tests/ 360，含 fleet 71 + usage 15 + escalation 23 + billing 15 + platform_tokens 22 + statebuilder/FEFO + harness 扩展包 + W-01/W-02/W-06 各单回归；`providers/e2b_compat` 41、`tools/console-tui` 87 含 timeline、`tools/spec-gate/tests` 7，四件套同会话收集）。〔勘误史〕收口提交 bc12adf 曾写 320/76（误用合并前 ae23962 树实测）；v2.1 报告 R1-D3 勘误另记 356/82（与同树复跑不符）——均以本节数字为准。合并态收口=上表三分支 merge commit 已在 main（本仓可独立复核，不依赖台账现态）；CNB 台账行"分支卫生收口"（8e431b26）的收口 SQL 随 company-ops `ops/sql/009`〔待应用，跟踪见其 docs/db-state-registry.md〕。（2026-09-28 D6-R3：原「见 glue 台账行」指针在行收口前会误读为未并，据此改写。）
+合并态整仓 `python -m pytest` 499 项全绿（2026-09-28 D6-R2 @ bc12adf 实测 486/358，D1-R2 补 ablation tenant 用例 +1 后复测 487，D1-R3 billing 归集租户隔离修复补 1 例 + 纳入 spec-gate 语义测试 7 例后复测 495 @ D1-R3 修复提交：主包 tests/ 360，含 fleet 71 + usage 15 + escalation 23 + billing 15 + platform_tokens 22 + statebuilder/FEFO + harness 扩展包 + W-01/W-02/W-06 各单回归；D4-R3 语义回归钉 7→9 后 497（同提交未同步本节，本轮补记）；D1-R4 租约派生同租户不变式补 2 例后 499 @ D1-R4 修复提交：主包 tests/ 362；`providers/e2b_compat` 41、`tools/console-tui` 87 含 timeline、`tools/spec-gate/tests` 9，四件套同会话收集）。〔勘误史〕收口提交 bc12adf 曾写 320/76（误用合并前 ae23962 树实测）；v2.1 报告 R1-D3 勘误另记 356/82（与同树复跑不符）；D4-R3 提交 a0f4fd3 漏更本节（497 实测仍写 495）——均以本节数字为准。合并态收口=上表三分支 merge commit 已在 main（本仓可独立复核，不依赖台账现态）；CNB 台账行"分支卫生收口"（8e431b26）的收口 SQL 随 company-ops `ops/sql/009`〔待应用，跟踪见其 docs/db-state-registry.md〕。（2026-09-28 D6-R3：原「见 glue 台账行」指针在行收口前会误读为未并，据此改写。）
 
 ## Postgres DDL
 

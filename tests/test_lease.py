@@ -229,3 +229,34 @@ def test_rejected_derivation_leaves_parent_budget_intact(clock):
     ok = led.grant("task-ok", 30, parent_lease_id=parent.lease_id,
                    effective_perms=EffectivePerms(perms=frozenset({"read:a"})))
     assert parent.remaining == 70 and ok.remaining == 30
+
+
+def test_cross_tenant_derivation_rejected(clock):
+    """租户边界（D1-R4）：派生必须同租户——显式声明他租 tenant_id 被拒绝，
+    父剩余额零副作用（校验先于划扣），GRANT_REJECTED 留痕。"""
+    led = BudgetLedger(now=clock)
+    parent = led.grant("task-A", 100, tenant_id="tA")
+    with pytest.raises(LeaseDerivationError) as ei:
+        led.grant("task-B", 50, parent_lease_id=parent.lease_id, tenant_id="tB")
+    assert "cross-tenant derivation rejected" in str(ei.value)
+    assert parent.remaining == 100                          # 拒绝路径零副作用
+    assert led.children_of(parent.lease_id) == []
+    assert led.audit[-1].event == "GRANT_REJECTED"
+    assert led.audit[-1].detail["reason"].startswith("cross-tenant derivation")
+    assert led.audit[-1].detail["parent_tenant"] == "tA"
+    assert led.audit[-1].detail["requested_tenant"] == "tB"
+    # 同租户派生照常放行
+    ok = led.grant("task-C", 50, parent_lease_id=parent.lease_id, tenant_id="tA")
+    assert parent.remaining == 50 and ok.remaining == 50
+
+
+def test_derivation_without_tenant_inherits_parent_tenant(clock):
+    """租户边界（D1-R4）：派生未声明 tenant_id → 继承父租约租户
+    （"随子任务派生"：子任务与父任务同属一方），而非静默落到默认 t0。"""
+    led = BudgetLedger(now=clock)
+    parent = led.grant("task-A", 100, tenant_id="tA")
+    child = led.grant("task-B", 50, parent_lease_id=parent.lease_id)
+    assert child.tenant_id == "tA"
+    assert led.audit[-1].tenant_id == "tA"                  # GRANT 事件携带
+    # 根发放未声明仍默认 t0（既有语义不变）
+    assert led.grant("task-root", 10).tenant_id == "t0"
