@@ -260,3 +260,28 @@ def test_derivation_without_tenant_inherits_parent_tenant(clock):
     assert led.audit[-1].tenant_id == "tA"                  # GRANT 事件携带
     # 根发放未声明仍默认 t0（既有语义不变）
     assert led.grant("task-root", 10).tenant_id == "t0"
+
+
+def test_grant_ttl_must_be_positive_finite(clock):
+    """R7 修复轮（终局补漏，#16 推广到 leases 模块）：ttl_seconds 非有限/非正数
+    构造期拒绝——NaN 经 ``ttl <= 0`` 恒 False 静默通过 → expires_at=nan →
+    is_expired_at（now >= nan 恒 False）永不惰性过期，「租约过期即断流」
+    fail-open；±inf 同理永不过期；巨型 int 经 now+ttl 的 float 转换抛未归类
+    OverflowError；负 ttl 使租约出生即过期（静默，此前仅 DB 层
+    CHECK(expires_at>granted_at) 会拒，进程内参考语义层不拒）。与
+    challenge.open 的 ttl_seconds 闸（challenge.py 同款 _finite 口径）对齐。"""
+    led = BudgetLedger(now=clock)
+    for bad in (float("nan"), float("inf"), float("-inf"), 10**400, 0, -5, "60"):
+        with pytest.raises(LeaseDerivationError, match="ttl_seconds"):
+            led.grant("task-1", 100, ttl_seconds=bad)
+    # 拒绝路径零副作用：无租约被创建，且每次拒绝都有 GRANT_REJECTED 留痕
+    assert led._leases == {}
+    assert sum(1 for e in led.audit if e.event == "GRANT_REJECTED") == 7
+
+
+def test_grant_ttl_none_still_means_no_expiry(clock):
+    """ttl_seconds=None（无有效期语义）保持既有接受面不变。"""
+    led = BudgetLedger(now=clock)
+    lease = led.grant("task-1", 100, ttl_seconds=None)
+    assert lease.expires_at is None
+    assert led.status_of(lease.lease_id) == ACTIVE

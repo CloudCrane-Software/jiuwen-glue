@@ -355,3 +355,50 @@ def test_dispatch_mode_direct_flow(clock):
     assert result.lease_ref is None                # 未接 BudgetLedger → 无租约
     mode.complete(result.assignment_id, artifact_ref="git://repo/abc")
     assert result.status == ASSIGN_COMPLETED
+
+
+# ── R7 修复轮（终局，D4-R7 抽查补漏）：非有限值 fail-open 三处收口 ─────────────
+
+def test_share_ledger_rejects_nonfinite_gpu_frac_no_poisoning(clock):
+    """ShareLedger.commit 对 gpu_frac 原无闸：NaN 入账后 committed_gpu=nan，
+    ``gpu_demand > free_gpu + GPU_FRAC_EPS`` 对 NaN 恒 False——单笔投毒即把
+    GPU_SHORTFALL 节点变成 admitted（overcommit fail-open）。修复后非有限/
+    越出 [0,1] 份额域一律拒绝，账面不动，同 demand 仍被拒。"""
+    sched = _sched(clock, _trusted("node-1", gpu_frac=1.0))
+    full = sched.assign(TaskOffering(task_ref="t1", gpu_demand=1.0))
+    assert isinstance(full, Assignment)
+    over = sched.assign(TaskOffering(task_ref="t2", gpu_demand=0.95))
+    assert isinstance(over, Rejected) and over.code == REJECT_GPU
+    with pytest.raises(SchedulingError, match="gpu_frac"):
+        sched._ledger.commit("poison", "node-1", float("nan"))
+    with pytest.raises(SchedulingError, match="gpu_frac"):
+        sched._ledger.commit("poison2", "node-1", float("inf"))
+    with pytest.raises(SchedulingError, match="gpu_frac"):
+        sched._ledger.commit("poison3", "node-1", 1.5)   # 越出份额域
+    # 投毒全部被拒：账面未动（仍满载），同 demand 依旧 GPU_SHORTFALL
+    assert sched.free_gpu_frac("node-1") == 0.0
+    still = sched.assign(TaskOffering(task_ref="t3", gpu_demand=0.95))
+    assert isinstance(still, Rejected) and still.code == REJECT_GPU
+
+
+def test_self_pick_ttl_nonfinite_rejected_not_cap_bypass(clock):
+    """自取制 lease_ttl=NaN 原经 ``ttl <= 0`` 与 ``ttl > max_self_pick_lease``
+    双比较恒 False 静默穿过两道闸（TTL≤1h 上限闸对 NaN 失效，实测 ACCEPTED）；
+    巨型 int 经 float() 抛未归类 OverflowError。修复后构造期 SchedulingError。
+    （-inf/-5 既有「must be positive」闸与 inf→TTL_CAP 闸原本就工作，保持。）"""
+    sched = _sched(clock, _trusted("node-1"))
+    for bad in (float("nan"), 10**400):
+        with pytest.raises(SchedulingError, match="ttl"):
+            sched.assign(TaskOffering(task_ref="t1"),
+                         dispatch=DISPATCH_SELF_PICK, lease_ttl=bad)
+    assert sched.assignments == {}
+    # 既有边界闸不回退：负 ttl 拒、超帽拒、合法 ttl 收
+    with pytest.raises(SchedulingError, match="positive"):
+        sched.assign(TaskOffering(task_ref="t2"),
+                     dispatch=DISPATCH_SELF_PICK, lease_ttl=-5)
+    capped = sched.assign(TaskOffering(task_ref="t3"),
+                          dispatch=DISPATCH_SELF_PICK, lease_ttl=3601)
+    assert isinstance(capped, Rejected) and capped.code == REJECT_TTL_CAP
+    ok = sched.assign(TaskOffering(task_ref="t4"),
+                      dispatch=DISPATCH_SELF_PICK, lease_ttl=600)
+    assert isinstance(ok, Assignment)
