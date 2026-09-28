@@ -44,7 +44,7 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 ```bash
 pip install -e .          # 或 uv pip install -e .
-python -m pytest          # 主包 320 项测试，全离线（无需数据库/网络）；providers/e2b_compat 与 tools/console-tui 子包另各 41 / 76 项
+python -m pytest          # 整仓 486 项测试，全离线（无需数据库/网络）：主包 tests/ 358 + providers/e2b_compat 41 + tools/console-tui 87（2026-09-28 D6-R2 @ main=bc12adf 实测；testpaths 已含三件套，子包亦可各自独立 pytest）
 ```
 
 ```python
@@ -91,12 +91,12 @@ assert result.executable          # fail-closed：只有 PASS 为 True
 | **fleet 调度器**（WO-0011） | 节点池注册协议（OpenBao JWT 声明式注册/心跳/STALE 兜底，不验签）+ P1 贪心调度器（派工制/自取制两模式、份额记账、Budget Lease 派生）+ 自取制 worker 客户端协议（模拟侧）；复用 routes/leases/identity/guardrail，不重造 | `src/jiuwen_glue/fleet/`（registration / scheduler / worker） | 71 项（全离线；P2 bin-packing 后） | PROP-0003 / PROP-0004 P1；v1.7 §12.6/§13 |
 | **决策层 MVP**（WO-0010 + WO-0007 件 1/2） | JevProvider 三原语 classify/score/judge（返回值携带 decision_ref，每次高频决策落账）+ RuleBasedBackend 确定性后端 + `make_score_hook`（晋升打分唯一交叉点）；准入前 A/B 消融对照（sign-test 判定）；准入台账（消融+GuardrailRun 硬规则）+ skill-pack 外发 | `src/jiuwen_glue/` 下 `decision.py` / `ablation.py` / `admission.py` | 49 项 | v1.7 §0 总则 6/§12.7；v1.6 §4.7；手册 §3.3.1 原则三 |
 | **e2b_compat Provider**（PROP-0008） | openJiuwen SandboxRegistry 的 E2B 兼容三件套——云突发沙箱接成沙箱新 backend，不改 openjiwen 代码，glue 不新增沙箱决策点；核心零依赖，缺 e2b SDK 时优雅降级报错。**当前为 mock 级交付**（测试全用假客户端，未连真实 E2B 云） | `providers/e2b_compat/`（独立子包） | 41 项 | PROP-0008；v1.7 §12.8；`docs/e2b-compat-provider.md` |
-| **console-tui 治理驾驶舱**（WO-0012） | 治理面作战室 TUI（Textual）：读 glue 库五面板 + 三级受控干预 s/a/p，全部干预经控制台留痕（GuardrailRun Challenge 语义）；无 DSN 时 mock 演示模式；含第三方 TUI 开源项目评估报告（先评估后引进） | `tools/console-tui/`（独立工具包）；`tools/console-tui/docs/{console-tui,tui-research}.md` | 76 项 | v1.7 §12.3；TUI 调研 PROP-0007 |
+| **console-tui 治理驾驶舱**（WO-0012） | 治理面作战室 TUI（Textual）：读 glue 库五面板 + 三级受控干预 s/a/p，全部干预经控制台留痕（GuardrailRun Challenge 语义）；无 DSN 时 mock 演示模式；含第三方 TUI 开源项目评估报告（先评估后引进） | `tools/console-tui/`（独立工具包）；`tools/console-tui/docs/{console-tui,tui-research}.md` | 87 项（2026-09-28 D6-R2 实测，含 timeline 合并与 challenge 回归增量） | v1.7 §12.3；TUI 调研 PROP-0007 |
 | **usage 计量**（v2.0 W-04） | usage_events 四维度 append-only 计量 + 租约-Higress consumer 绑定与 cutoff_due/cutoff_plan 断流求值 + TUI usage 面板（pg 读 glue.v_usage 参数化） | `src/jiuwen_glue/usage.py` | 15 项（全离线） | v2.0 §4.4；报告 §W-04 |
 | **escalation 升级阶梯 + 裁决卡**（v2.1 W-06） | 六级阶梯单步推进 + 人类就绪包四件套 + L4→L5 硬闸（就绪包签名==blocker 签名）+ 风暴防护三防线（级内总量上限/最小步进间隔/签名去重）+ TUI AdjudicationCard（y=approve fail-closed / e=escalate 打回 L3） | `src/jiuwen_glue/escalation.py`；`tools/console-tui/`（裁决卡） | 23 项（glue 侧） | v2.1 §4.7；报告 §W-06 |
-| **未并分支模块**（见台账行"分支卫生收口"） | platform_tokens 铸造器（TTL≤1h/禁缓存禁代签，W-09）在 `feat/w09-platform-tokens`；billing 结算（W-07）在 `billing/p0`；TUI timeline（W-11）在 `feat/w11-tui-timeline`——**均未并入 main，本表不将其计入上述测试数** | 各分支 `src/jiuwen_glue/`；`tools/console-tui/` | 未并态不计数 | v2.1 报告 ⑤.1/⑥F；glue 台账行 8e431b26 |
+| **Wave2 分支模块（已并 main）** | platform_tokens 铸造器（TTL≤1h/禁缓存禁代签，W-09，22 例）经 3342fc0 并入；billing 结算（W-07，14 例）经 6ec8807 并入；TUI timeline（W-11）经 88e93f9 并入——**三者均已在 main，用例计入上述计数**。〔勘误 2026-09-28 D6-R2〕收口提交 bc12adf 曾沿用合并前 ae23962 树的实测数并误标"均未并入 main"，与本树事实不符，已按 bc12adf 树重测更正 | `src/jiuwen_glue/`（billing.py / platform_tokens.py）；`tools/console-tui/`（timeline） | 已计入（主包 358 / tui 87） | v2.1 报告 ⑤.1/⑥F；glue 台账行 8e431b26 |
 
-合并后主包 `python -m pytest` 320 项全绿（ae23962 实测：含 fleet 71 + usage 15 + escalation 23 + statebuilder/FEFO + harness 扩展包 + W-01/W-02/W-06 各单回归）；`providers/e2b_compat` 与 `tools/console-tui` 各自独立 pytest 全绿（41 / 76）。三个未并分支（billing/p0、feat/w09-platform-tokens、feat/w11-tui-timeline）的新增用例不计入上数，合并态收口见 glue 台账行"分支卫生收口"。
+合并态整仓 `python -m pytest` 486 项全绿（2026-09-28 D6-R2 @ main=bc12adf 实测：主包 tests/ 358，含 fleet 71 + usage 15 + escalation 23 + billing 14 + platform_tokens 22 + statebuilder/FEFO + harness 扩展包 + W-01/W-02/W-06 各单回归；`providers/e2b_compat` 41、`tools/console-tui` 87 含 timeline，三件套同会话收集）。〔勘误史〕收口提交 bc12adf 曾写 320/76（误用合并前 ae23962 树实测）；v2.1 报告 R1-D3 勘误另记 356/82（与同树复跑不符）——均以本节数字为准。合并态收口见 glue 台账行"分支卫生收口"。
 
 ## Postgres DDL
 
