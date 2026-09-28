@@ -1,0 +1,39 @@
+# glue CI 门禁（D1-R2 修复：主仓此前无任何仓内推送触发的测试门禁——回归只能等
+# company-ops CNB 流水线（push company-ops main 时拉 GitHub main）才暴露，直接
+# push 本仓不触发任何检查。对齐 D1-R1 先例：session-broker/skill-pack 各有 ci.yml）。
+# 元资产纪律（PROP-0001 v2.1 §11/§14）：本文件改动强制 owner PR 审（zizmor 常开）。
+# 口径：仓根裸 pytest 全量（testpaths 三件套 = tests/ + providers/e2b_compat +
+# tools/console-tui），floor 断言随上游如实核查回填（只升不降，不许静默放行）；
+# 当前 floor=487 对应 D1-R2 修复提交本地实测 487 passed（主包 359 + e2b_compat 41
+# + console-tui 87）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install pytest pytest-asyncio textual -e .
+      - name: pytest with floor
+        run: |
+          set -e
+          python -m pytest > pytest.log 2>&1 || { tail -30 pytest.log; exit 1; }
+          tail -3 pytest.log
+          N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
+          [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
+          [ "$N" -ge 487 ] || { echo "passed=$N < 487 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 487)"
