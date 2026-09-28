@@ -102,6 +102,19 @@ def test_negative_or_nonfinite_quantity_rejected():
             ledger.record_compute_seconds(bad)
 
 
+def test_nonfinite_or_giant_occurred_at_and_quantity_rejected():
+    """R7/D1：occurred_at 非有限（NaN/±inf/巨型 int）在半开窗聚合中落进每一个
+    窗口（不相交窗重复计费）；巨型 int quantity 原实现经 float() 变形为
+    OverflowError 未归类崩溃——均按 UsageSchemaError fail-closed（与
+    billing.UsageEventRow / _in_window 同口径）。"""
+    for bad in (float("nan"), float("inf"), 10**309):
+        with pytest.raises(UsageSchemaError, match="occurred_at"):
+            UsageEvent(event_id="e-occ", kind=KIND_COMPUTE_SECONDS, quantity=1,
+                       occurred_at=bad)
+    with pytest.raises(UsageSchemaError, match="quantity"):
+        UsageEvent(event_id="e-q", kind=KIND_COMPUTE_SECONDS, quantity=10**309)
+
+
 def test_unknown_kind_rejected():
     with pytest.raises(UsageSchemaError, match="usage kind"):
         UsageEvent(event_id="e", kind="gpu_hours", quantity=1)

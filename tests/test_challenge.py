@@ -126,6 +126,18 @@ def test_open_validation(clock):
         board.state_of("nope")
 
 
+def test_open_rejects_nonfinite_ttl_never_expiring_challenge(clock):
+    """R7/D1：ttl 非有限（NaN/±inf/巨型 int）= 永不过期的 Challenge——
+    ``nan <= 0`` 恒 False 静默通过后 expires_at=nan，is_expired_at 恒 False，
+    过期闸 fail-open（任意时刻仍可被批准）；与 docstring『无有效期的 Challenge
+    不允许存在』相悖，同按 ChallengeStateError 拒绝（巨型 int 不变形为
+    OverflowError 未归类崩溃，与 StormGuard D1-R6 PR#15 同口径）。"""
+    board = ChallengeBoard(now=clock)
+    for bad in (float("nan"), float("inf"), 10**309):
+        with pytest.raises(ChallengeStateError):
+            _open(board, ttl_seconds=bad)
+
+
 def test_wrong_confirmer_realm_rejected(clock):
     """who 维度强制：错域裁决人一律拒绝（by 必须落在 who_confirms 的前缀域内）；
     拒绝后 Challenge 保持 pending，且不留 RESOLVE 审计痕。"""
