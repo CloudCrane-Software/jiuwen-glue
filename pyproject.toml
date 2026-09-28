@@ -31,9 +31,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 # 仓根裸 pytest 即整仓门禁口径：主包 tests/ + e2b_compat + console-tui 子包
-# 全部收集（D1 修复：此前 testpaths 只含 tests/，根裸 pytest 恒不收集两子包，
-# CNB 环节5 因此漏掉 41+76+ 例回归）。子包目录下单独跑 pytest 仍走各自 ini。
-testpaths = ["tests", "providers/e2b_compat/tests", "tools/console-tui/tests"]
+# + spec-gate 语义测试 全部收集（D1 修复：此前 testpaths 只含 tests/，根裸
+# pytest 恒不收集两子包，CNB 环节5 因此漏掉 41+76+ 例回归。D1-R3 起再纳入
+# tools/spec-gate/tests——spec-gate fail-closed 语义回归钉（空证据维度
+# BLOCKED 非零退出）自此随整仓门禁自动跑，不再只靠人工按需运行）。
+# 子包目录下单独跑 pytest 仍走各自 ini。
+testpaths = ["tests", "providers/e2b_compat/tests", "tools/console-tui/tests",
+             "tools/spec-gate/tests"]
 addopts = "-q"
 # 从仓库外整仓收集（如 python -m pytest <repo>/ -q）时，rootdir 配置取本文件，
 # 子包各自 pyproject 的 ini 不再生效——这里集中声明子包 src 路径与 asyncio 模式，

@@ -44,7 +44,7 @@ openJiuwen 胶水层（glue layer）。一句话：**只做 openJiuwen 原生没
 
 ```bash
 pip install -e .          # 或 uv pip install -e .
-python -m pytest          # 整仓 487 项测试，全离线（无需数据库/网络）：主包 tests/ 359 + providers/e2b_compat 41 + tools/console-tui 87（2026-09-28 D6-R2 @ bc12adf 实测 486/358；D1-R2 补 ablation tenant 用例后 487/359；testpaths 已含三件套，子包亦可各自独立 pytest）
+python -m pytest          # 整仓 495 项测试，全离线（无需数据库/网络）：主包 tests/ 360 + providers/e2b_compat 41 + tools/console-tui 87 + tools/spec-gate/tests 7（2026-09-28 D6-R2 @ bc12adf 实测 486/358；D1-R2 补 ablation tenant 用例后 487/359；D1-R3 billing 归集租户隔离修复补 1 例并纳入 spec-gate 语义测试 7 例后 495/360；testpaths 已含四件套，子包亦可各自独立 pytest）
 ```
 
 ```python
@@ -94,9 +94,9 @@ assert result.executable          # fail-closed：只有 PASS 为 True
 | **console-tui 治理驾驶舱**（WO-0012） | 治理面作战室 TUI（Textual）：读 glue 库五面板 + 三级受控干预 s/a/p，全部干预经控制台留痕（GuardrailRun Challenge 语义）；无 DSN 时 mock 演示模式；含第三方 TUI 开源项目评估报告（先评估后引进） | `tools/console-tui/`（独立工具包）；`tools/console-tui/docs/{console-tui,tui-research}.md` | 87 项（2026-09-28 D6-R2 实测，含 timeline 合并与 challenge 回归增量） | v1.7 §12.3；TUI 调研 PROP-0007 |
 | **usage 计量**（v2.0 W-04） | usage_events 四维度 append-only 计量 + 租约-Higress consumer 绑定与 cutoff_due/cutoff_plan 断流求值 + TUI usage 面板（pg 读 glue.v_usage 参数化） | `src/jiuwen_glue/usage.py` | 15 项（全离线） | v2.0 §4.4；报告 §W-04 |
 | **escalation 升级阶梯 + 裁决卡**（v2.1 W-06） | 六级阶梯单步推进 + 人类就绪包四件套 + L4→L5 硬闸（就绪包签名==blocker 签名）+ 风暴防护三防线（级内总量上限/最小步进间隔/签名去重）+ TUI AdjudicationCard（y=approve fail-closed / e=escalate 打回 L3） | `src/jiuwen_glue/escalation.py`；`tools/console-tui/`（裁决卡） | 23 项（glue 侧） | v2.1 §4.7；报告 §W-06 |
-| **Wave2 分支模块（已并 main）** | platform_tokens 铸造器（TTL≤1h/禁缓存禁代签，W-09，22 例）经 3342fc0 并入；billing 结算（W-07，14 例）经 6ec8807 并入；TUI timeline（W-11）经 88e93f9 并入——**三者均已在 main，用例计入上述计数**。〔勘误 2026-09-28 D6-R2〕收口提交 bc12adf 曾沿用合并前 ae23962 树的实测数并误标"均未并入 main"，与本树事实不符，已按 bc12adf 树重测更正 | `src/jiuwen_glue/`（billing.py / platform_tokens.py）；`tools/console-tui/`（timeline） | 已计入（主包 359 / tui 87） | v2.1 报告 ⑤.1/⑥F；glue 台账行 8e431b26 |
+| **Wave2 分支模块（已并 main）** | platform_tokens 铸造器（TTL≤1h/禁缓存禁代签，W-09，22 例）经 3342fc0 并入；billing 结算（W-07，14 例）经 6ec8807 并入；TUI timeline（W-11）经 88e93f9 并入——**三者均已在 main，用例计入上述计数**。〔勘误 2026-09-28 D6-R2〕收口提交 bc12adf 曾沿用合并前 ae23962 树的实测数并误标"均未并入 main"，与本树事实不符，已按 bc12adf 树重测更正 | `src/jiuwen_glue/`（billing.py / platform_tokens.py）；`tools/console-tui/`（timeline） | 已计入（主包 360 / tui 87） | v2.1 报告 ⑤.1/⑥F；glue 台账行 8e431b26 |
 
-合并态整仓 `python -m pytest` 487 项全绿（2026-09-28 D6-R2 @ bc12adf 实测 486/358，D1-R2 补 ablation tenant 用例 +1 后 @ D1-R2 修复提交复测 487：主包 tests/ 359，含 fleet 71 + usage 15 + escalation 23 + billing 14 + platform_tokens 22 + statebuilder/FEFO + harness 扩展包 + W-01/W-02/W-06 各单回归；`providers/e2b_compat` 41、`tools/console-tui` 87 含 timeline，三件套同会话收集）。〔勘误史〕收口提交 bc12adf 曾写 320/76（误用合并前 ae23962 树实测）；v2.1 报告 R1-D3 勘误另记 356/82（与同树复跑不符）——均以本节数字为准。合并态收口见 glue 台账行"分支卫生收口"。
+合并态整仓 `python -m pytest` 495 项全绿（2026-09-28 D6-R2 @ bc12adf 实测 486/358，D1-R2 补 ablation tenant 用例 +1 后复测 487，D1-R3 billing 归集租户隔离修复补 1 例 + 纳入 spec-gate 语义测试 7 例后复测 495 @ D1-R3 修复提交：主包 tests/ 360，含 fleet 71 + usage 15 + escalation 23 + billing 15 + platform_tokens 22 + statebuilder/FEFO + harness 扩展包 + W-01/W-02/W-06 各单回归；`providers/e2b_compat` 41、`tools/console-tui` 87 含 timeline、`tools/spec-gate/tests` 7，四件套同会话收集）。〔勘误史〕收口提交 bc12adf 曾写 320/76（误用合并前 ae23962 树实测）；v2.1 报告 R1-D3 勘误另记 356/82（与同树复跑不符）——均以本节数字为准。合并态收口见 glue 台账行"分支卫生收口"。
 
 ## Postgres DDL
 

@@ -24,7 +24,8 @@ python tools/check_contracts.py                          # 契约 hash 秒检（
 
 > **退出码语义（D4-R2 起）**：0 = 六维全部 PASS；D3/D6 等空证据维度 = BLOCKED →
 > 1；有证据不达阈值 = FAIL → 1。`--static-only`（CI 环节9）不受影响。回归测试：
-> `python -m pytest tools/spec-gate/tests/ -q`（不在根 testpaths，不影响整仓 486 口径）。
+> `python -m pytest tools/spec-gate/tests/ -q`（D1-R3 起已入根 testpaths，随整仓
+> 门禁自动跑，整仓口径 486→495）。
 
 ## 文件
 

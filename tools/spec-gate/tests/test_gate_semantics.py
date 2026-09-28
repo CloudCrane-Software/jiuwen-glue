@@ -5,8 +5,9 @@
 - D6 零样本（outcome_cases.jsonl 缺失/空）→ BLOCKED，门禁非零退出；
 - D3 真实扇出未接线 → BLOCKED（demo 分离只作参考信号，不构成通过）；
 - 六维有证据但不达阈值 → FAIL，同非零；
-- 本目录不在根 pyproject testpaths（根裸 pytest 整仓口径 486 例保持不变），
-  按需运行：``python -m pytest tools/spec-gate/tests/ -q``。
+- D1-R3 起本目录已入根 pyproject testpaths：随仓根裸 pytest 整仓门禁自动跑
+  （floor=495，见 .github/workflows/ci.yml），防回归不再只靠人工按需运行；
+  仍可单跑：``python -m pytest tools/spec-gate/tests/ -q``。
 """
 from __future__ import annotations
 
