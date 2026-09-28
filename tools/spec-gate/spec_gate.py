@@ -21,13 +21,18 @@ D6 结局一致性 与结局标签背离率 <5%         无结局数据（无 re
 
     python tools/spec-gate/spec_gate.py                     # 六维全跑，报告打到 stdout
     python tools/spec-gate/spec_gate.py --out report.md     # 报告写文件
-    python tools/spec-gate/spec_gate.py --static-only       # CI 环节9：仅 specs 静态
-                                      一致性 + guardrail 例执行（六维全跑按需，太重）
+    python tools/spec-gate/spec_gate.py --static-only       # CI 环节9：specs 静态
+                                      一致性 + guardrail 例执行 + D3/D6 证据裁决
+                                      （D1/D2/D4/D5 全维计算按需，太重）
 
 退出码：0 = 门禁过（六维全部 PASS）。**空证据维度（D3 真实扇出未跑 / D6 无结局
 数据）= BLOCKED → 非零退出（1）**——v2.1 原则 2「空证据一律 UNKNOWN/BLOCKED，
 绝不默认放行」（D4-R2 修复：此前 [待数据] 维度不参与退出码，空证据被当作门禁
-通过）。有证据但不达阈值 = FAIL，同非零。``--static-only``（CI 环节9）语义不变。
+通过）。有证据但不达阈值 = FAIL，同非零。``--static-only``（CI 环节9）**同口径
+（D4-R3 修复）**：该分支在静态层之外同样裁决 D3/D6 证据，空证据 = BLOCKED → 1——
+此前 static-only 在六维计算前 return 0，CNB 环节9 在空证据时仍结论"通过"，
+与 v2.0 §5.2 运行现状 / M3 口径相悖，已废止。真实扇出接线与 outcome_cases.jsonl
+回流前，环节9 维持 BLOCKED 属方案钉定的 fail-closed 状态，不得以放宽门禁恢复绿色。
 """
 from __future__ import annotations
 
@@ -436,7 +441,31 @@ def main(argv=None) -> int:
         print(f"spec-gate 静态一致性检查通过：guardrail REQ×{len(gspec['reqs'])} "
               f"(可执行正例×{n_exec}) + leases REQ×{len(lspec['reqs'])} + "
               f"红反例×{len(red_cases)} 全部一致（对冻结契约实现）")
-        return 0
+        # D4-R3：静态层之外，--static-only 同样携带门禁结论——D3/D6 证据裁决
+        # 与全跑同口径，空证据 = BLOCKED → 非零退出，绝不默认放行（v2.0 §5.2
+        # 运行现状 / M3 口径；此前本分支在六维计算前 return 0，CNB 环节9 于
+        # 空证据时仍结论"通过"，该 fail-open 行为已废止）。D1/D2/D4/D5 全维
+        # 计算不在本分支（按需全跑），其结论以全跑报告为准。
+        d3 = dim_discrimination(red_cases)
+        d6 = dim_outcome_consistency(outcome_cases)
+        dims = (("D3", d3), ("D6", d6))
+        blocked = [name for name, d in dims
+                   if not d["pass"] and d.get("status") == "BLOCKED"]
+        failed = [name for name, d in dims
+                  if not d["pass"] and d.get("status") != "BLOCKED"]
+        if not blocked and not failed:
+            print("门禁结论：PASS（静态层 + D3/D6 证据完备且达标；"
+                  "D1/D2/D4/D5 全维结论以全跑报告为准）")
+            return 0
+        parts = []
+        if blocked:
+            parts.append("BLOCKED（空证据，不放行）: " + ", ".join(blocked))
+        if failed:
+            parts.append("FAIL: " + ", ".join(failed))
+        print("门禁结论：未通过 —— " + "；".join(parts))
+        print("消除条件见 docs/line-dogfood.md §3（D3 真实扇出接线 / D6 "
+              "outcome_cases.jsonl 回流）——不得以放宽门禁恢复绿色。")
+        return 1
 
     pos_all = [c for r in gspec["reqs"] for c in r["pos"] if "input" in c]
     d1 = dim_determinability(pos_all)
