@@ -1,7 +1,8 @@
 # coding: utf-8
 """计费 P0 测试（v2.1 §4.4/§7）— 计费 P0.
 
-覆盖：结算模式四枚举门（Python 第一道闸）、internal 按 project 归集、
+覆盖：结算模式四枚举门（Python 第一道闸）、internal 按 租户×project 归集
+（跨租户同名项目不串户）、
 append-only 不可改断言（ledger 无写路径 + frozen + 输入不被改动）、
 影子成本周报（空数据出表头 + 逐字节确定性）、影子价表（档案投影+冲突拒绝）、
 费率卡（快照 hash 验签+防篡改+frozen）、deterministic_settle（金额精确、
@@ -12,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -147,6 +149,31 @@ def test_aggregate_by_project_two_projects_and_unattributed():
     assert sum(u.events for u in windowed) == 2            # 事件 1、2
 
 
+def test_aggregate_by_project_tenant_isolation():
+    """tenant_id 参与分组（v_usage_by_project 权威口径，006_billing_p0.sql）：
+    跨租户同名 project_id 各自成桶不串户；tenant_id 全对象贯通
+    （UsageAggRow / ProjectUsage），周报同名项目带租户可辨。"""
+    events = [
+        _ev("t1a", 100, occurred_at=10, tenant_id="t1", project_id="proj-x"),
+        _ev("t2a", 100, occurred_at=20, tenant_id="t2", project_id="proj-x"),
+    ]
+    buckets = aggregate_by_project(events)
+    assert len(buckets) == 2                               # 不并桶（成本归集不串户）
+    assert [(u.tenant_id, u.project_id, u.events, u.quantity) for u in buckets] == [
+        ("t1", "proj-x", 1, 100.0), ("t2", "proj-x", 1, 100.0)]
+    assert all(r.tenant_id == u.tenant_id for u in buckets for r in u.rows)
+    # 缺 tenant_id 属性的裸事件归 t0（与 DDL 004 DEFAULT 't0' 同口径），不与具名租户混桶
+    bare = SimpleNamespace(
+        project_id="proj-x", settlement_class=SETTLEMENT_INTERNAL,
+        kind=KIND_COMPUTE_SECONDS, meter_type=None, quantity=5.0,
+        shadow_price=0, shadow_unit=None, occurred_at=30.0)
+    assert aggregate_by_project([bare])[0].tenant_id == "t0"
+    # 周报逐桶分节；跨租户同名项目在报告中可分辨
+    report = weekly_report(events, start=0, end=100)
+    assert "### 项目：proj-x（internal，租户 t1）" in report
+    assert "### 项目：proj-x（internal，租户 t2）" in report
+
+
 # ── 影子价表（resources/ 档案投影）────────────────────────────────────────────
 
 def test_shadow_price_table_from_profiles_conflict_and_lookup():
@@ -210,9 +237,9 @@ def test_weekly_report_renders_projects_and_is_byte_identical():
     assert weekly_report(shuffled, **kw) == r1
     # 内容断言：两项目 + 未归集桶都在；快照成本 75；价表对照 36（150×0.24，
     # 命中行全量重估、含快照已估价行——D1-R2 勘误：非"未估价才回填"旧口径）
-    assert "### 项目：proj-a（internal）" in r1
-    assert "### 项目：proj-b（internal）" in r1
-    assert "### 项目：（未归集）" in r1
+    assert "### 项目：proj-a（internal，租户 t0）" in r1
+    assert "### 项目：proj-b（internal，租户 t0）" in r1
+    assert "### 项目：（未归集）（internal，租户 t0）" in r1
     assert "| 75.0000 |" in r1 and "| 36.0000 |" in r1
     assert "cnb-sandbox#shadow_pricing[0] source=doc" in r1
     assert "未估价" in r1                                            # 无价行如实标注
@@ -400,4 +427,4 @@ def test_trial_and_free_classes_flow_through_aggregation():
         [("proj-a", SETTLEMENT_FREE), ("proj-trial", SETTLEMENT_TRIAL)]
     assert usage[1].rows[0].snapshot_cost == Decimal("14.4000")   # 60 × 0.24
     report = weekly_report(events, start=0, end=100)
-    assert "proj-trial（trial）" in report and "proj-a（free）" in report
+    assert "proj-trial（trial，租户 t0）" in report and "proj-a（free，租户 t0）" in report
