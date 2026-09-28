@@ -18,6 +18,9 @@
 # （test_aggregate_matches_eval_gate_reference）需 eval-gate 在场，CI 不装则
 # skip（eval-gate 在场 501 passed + 0 skipped / CI 不装 500 passed + 1 skipped，实测两种口径）——floor 按
 # CI 口径 500 计，skip 不计入 passed（eval-gate README 偏差登记行 R5 订正句）。
+# D1-R6：gate() 必填缺交折算 UNKNOWN 参与聚合（不短路掩盖已提交 BLOCKED，
+# 验收 R6-D1 #1）补 3 用例（guardrail 2 + admission 1），floor 500→503 同轮棘轮
+# （eval-gate 在场口径 504 passed + 0 skipped 实测）。
 name: ci
 
 on:
@@ -49,5 +52,5 @@ jobs:
           tail -3 pytest.log
           N="$(grep -oE '[0-9]+ passed' pytest.log | tail -1 | grep -oE '[0-9]+')"
           [ -n "$N" ] || { echo "cannot parse passed count"; tail -30 pytest.log; exit 1; }
-          [ "$N" -ge 500 ] || { echo "passed=$N < 500 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
-          echo "jiuwen-glue floor OK: $N passed (>= 500)"
+          [ "$N" -ge 503 ] || { echo "passed=$N < 503 (upstream changed? re-verify and re-ratchet, never silently loosen)"; exit 1; }
+          echo "jiuwen-glue floor OK: $N passed (>= 503)"

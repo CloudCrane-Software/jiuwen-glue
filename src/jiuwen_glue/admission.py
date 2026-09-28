@@ -10,7 +10,8 @@
 - 消融 IMPROVED 才算"通过"（默认；NEUTRAL / REGRESSED / INCONCLUSIVE → REJECTED，
   其中 INCONCLUSIVE 是 WO-0007 明文的"拒绝准入的合法结论"）；
 - 优先级：**门控协议完备性优先**——UNKNOWN 一律 HELD，消融结论只在门控
-  PASS / BLOCKED 时参与终审（协议未闭合时任何终审都不可靠）。
+  PASS / BLOCKED 时参与终审（门控 UNKNOWN＝协议未闭合或证据不全，任何终审
+  都不可靠；已提交 BLOCKED 一票否决优先于缺交，R6/D1 与 glue gate() 同序）。
 
 append-only：:class:`AdmissionLedger` 只有 ``admit()`` 与查询，无 update/delete；
 记录 frozen。外发：:func:`export_to_skillpack` 产出 skill-pack 仓 OKF spec
@@ -52,7 +53,8 @@ def guardrail_verdict_of(run: GuardrailRun) -> str:
     """从 GuardrailRun 派生聚合 verdict（镜像 ``GuardrailRunStore.gate()`` 语义）.
 
     聚合用同一个 ``guardrail.aggregate``，语义与 store 完全一致：
-    OPEN / VOID / 必填 check 未提交 → UNKNOWN；FINALIZED → 聚合三态。
+    OPEN / VOID → UNKNOWN；FINALIZED → 聚合三态（必填 check 未提交折算 UNKNOWN
+    参与聚合——已提交 BLOCKED 一票否决，R6/D1 与 store.gate() 同序）。
     生产中进程内直接持有 run 对象时用本函数；跨进程应以 store.gate() 的
     GuardrailResult 为准（聚合输出的唯一来源是 GuardrailRunStore）。
     """
@@ -63,9 +65,10 @@ def guardrail_verdict_of(run: GuardrailRun) -> str:
         return VERDICT_UNKNOWN   # OPEN = 协议未闭合；VOID = 现场已变化（均 fail-closed）
     missing = [c.check_id for c in run.spec.checks
                if c.required and c.check_id not in run.results]
-    if missing:
-        return VERDICT_UNKNOWN
-    return aggregate([r.verdict for r in run.results.values()])
+    # R6/D1：必填未提交折算 UNKNOWN 参与同一聚合（与 store.gate() 完全同序）——
+    # 已提交 BLOCKED 一票否决仍终审 BLOCKED；缺交且无 BLOCKED 时 UNKNOWN。
+    return aggregate([r.verdict for r in run.results.values()]
+                     + [VERDICT_UNKNOWN] * len(missing))
 
 
 @dataclass(frozen=True)

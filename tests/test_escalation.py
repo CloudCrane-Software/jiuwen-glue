@@ -120,6 +120,14 @@ def test_custom_guard_validates_parameters():
                    {"dedup_window_seconds": -1}, {"signature_threshold": 0}):
         with pytest.raises(EscalationSchemaError):
             StormGuard(**kwargs)
+    # R6/D1：NaN 经 ``nan < 0`` 恒 False 静默通过，进入比较后 ``(now-x) < nan``
+    # 恒 False ——签名去重与最小步进两道风暴闸被静默关闭（fail-open）；±inf 同拒。
+    nan = float("nan")
+    for kwargs in ({"dedup_window_seconds": nan}, {"min_step_interval_seconds": nan},
+                   {"dedup_window_seconds": float("inf")},
+                   {"min_step_interval_seconds": float("-inf")}):
+        with pytest.raises(EscalationSchemaError):
+            StormGuard(**kwargs)
 
 
 # ── 风暴防护二：向下回退 ≤1 ──────────────────────────────────────────────────

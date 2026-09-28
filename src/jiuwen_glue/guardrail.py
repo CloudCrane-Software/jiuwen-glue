@@ -319,7 +319,10 @@ class GuardrailRunStore:
                                    checked_at=now)
         per_check: Dict[str, str] = {k: r.verdict for k, r in run.results.items()}
         missing = self._missing_required(run)
-        verdict = aggregate(list(per_check.values())) if not missing else VERDICT_UNKNOWN
+        # R6/D1：必填 check 未提交折算为 UNKNOWN **参与同一聚合**，不短路掩盖
+        # 已提交的 BLOCKED——与 aggregate()（BLOCKED 一票否决）、模块 docstring、
+        # eval-gate 参考实现同序；缺交且无 BLOCKED 时仍 UNKNOWN（fail-closed 不变）。
+        verdict = aggregate(list(per_check.values()) + [VERDICT_UNKNOWN] * len(missing))
         return GuardrailResult(run_id=run_id, verdict=verdict, state=run.state,
                                per_check=per_check, missing_required=tuple(missing),
                                checked_at=now)

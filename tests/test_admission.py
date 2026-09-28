@@ -10,6 +10,7 @@ import pytest
 
 from jiuwen_glue import (
     BACKEND_EVAL_GATE,
+    BACKEND_PERMISSION_RAIL,
     DECISION_ALLOWED,
     DECISION_HELD,
     DECISION_REJECTED,
@@ -110,6 +111,26 @@ def test_inconclusive_ablation_with_pass_guardrail_is_a_legal_rejection(clock):
                        _ablation_result(VERDICT_INCONCLUSIVE))
     assert rec.decision == DECISION_REJECTED
     assert "legal rejection" in rec.reason
+
+
+def test_missing_required_with_blocked_is_rejected_not_held(clock):
+    """R6/D1 镜像钉：FINALIZED 且必填缺交、但已提交 check BLOCKED → 派生 verdict
+    BLOCKED（一票否决优先于缺交）→ REJECTED 终审，而非 HELD 补齐重试
+    （BLOCKED 吸收：补齐协议不可能翻转结论，HELD 只会空耗一轮再准入）。"""
+    store = GuardrailRunStore()
+    run = store.create_run(GuardrailSpec(
+        action="experience.admit", resource=CANDIDATE,
+        agent_identity_ref="agent:glue/inst-1/task-1", spec_version="spec-v3",
+        checks=(CheckSpec(check_id="ablation-gate", backend=BACKEND_EVAL_GATE),
+                CheckSpec(check_id="human-review", backend=BACKEND_PERMISSION_RAIL))))
+    store.submit_check(run.run_id, "ablation-gate", OUTCOME_BLOCKED,
+                       evidence_ref="ev-evalgate-blocked-missing")
+    store.finalize(run.run_id, seal_ref="seal-admit-mb")
+    assert guardrail_verdict_of(run) == VERDICT_BLOCKED
+    ledger = AdmissionLedger(now=clock)
+    rec = ledger.admit(CANDIDATE, run, _ablation_result(VERDICT_IMPROVED))
+    assert rec.decision == DECISION_REJECTED
+    assert rec.guardrail_verdict == VERDICT_BLOCKED
 
 
 def test_held_reason_references_readmission_not_final(clock):

@@ -35,6 +35,7 @@
 """
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -143,12 +144,19 @@ class StormGuard:
                 "max_total_attempts_per_level must be an int >= max_attempts_per_level")
         if not isinstance(self.max_downgrades, int) or self.max_downgrades < 0:
             raise EscalationSchemaError("max_downgrades must be a non-negative int")
-        if not isinstance(self.dedup_window_seconds, (int, float)) or self.dedup_window_seconds < 0:
-            raise EscalationSchemaError("dedup_window_seconds must be a non-negative number")
+        # R6/D1：NaN 经 ``nan < 0`` 恒 False 静默通过，随后 ``(now-last) < nan``
+        # 恒 False ——两道风暴闸被静默关闭（fail-open 方向）；±inf 同拒（inf 方向
+        # 虽 fail-closed，但非有限窗口不是合法配置，schema 层一并 fail-closed）。
+        if (not isinstance(self.dedup_window_seconds, (int, float))
+                or not math.isfinite(self.dedup_window_seconds)
+                or self.dedup_window_seconds < 0):
+            raise EscalationSchemaError(
+                "dedup_window_seconds must be a finite non-negative number")
         if (not isinstance(self.min_step_interval_seconds, (int, float))
+                or not math.isfinite(self.min_step_interval_seconds)
                 or self.min_step_interval_seconds < 0):
             raise EscalationSchemaError(
-                "min_step_interval_seconds must be a non-negative number")
+                "min_step_interval_seconds must be a finite non-negative number")
         if not isinstance(self.signature_threshold, int) or self.signature_threshold < 1:
             raise EscalationSchemaError("signature_threshold must be a positive int")
 
