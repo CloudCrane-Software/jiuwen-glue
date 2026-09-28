@@ -11,6 +11,7 @@ fail-closed、同输入逐字节一致、**改费率不改历史账单**）。
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -300,7 +301,9 @@ def test_weekly_report_renders_projects_and_is_byte_identical():
 # ── 费率卡：解析、验签、防篡改 ────────────────────────────────────────────────
 
 def _card_mapping(unit_price="0.002", snapshot_hash=None, customer="cust-acme",
-                  version=1, card_id="rc-cust-acme-20261001"):
+                  version=1, card_id="rc-cust-acme-20261001",
+                  effective_from="2026-10-01T00:00:00+08:00",
+                  effective_until=None):
     lines = [
         {"line_id": "L1", "meter": "token_upstream_qwen3_max", "unit": "k_token",
          "unit_price": unit_price},
@@ -308,16 +311,24 @@ def _card_mapping(unit_price="0.002", snapshot_hash=None, customer="cust-acme",
          "unit_price": "0.30", "min_charge": "1.00"},
     ]
     if snapshot_hash is None:
-        snapshot_hash = rate_card_snapshot_hash([
-            RateCardLine(line_id=l["line_id"], meter=l["meter"], unit=l["unit"],
-                         unit_price=Decimal(l["unit_price"]),
-                         min_charge=Decimal(l["min_charge"]) if "min_charge" in l else None)
-            for l in lines])
+        # 整卡口径签名（D1-R7 终局轮）：hash 覆盖身份/窗口/版本 + 价格行
+        snapshot_hash = rate_card_snapshot_hash(
+            schema=RATE_CARD_SCHEMA, rate_card_id=card_id,
+            customer_id=customer, currency="cny", version=version,
+            effective_from=datetime.fromisoformat(effective_from).timestamp(),
+            effective_until=None if effective_until is None
+            else datetime.fromisoformat(effective_until).timestamp(),
+            lines=[RateCardLine(line_id=l["line_id"], meter=l["meter"],
+                                unit=l["unit"],
+                                unit_price=Decimal(l["unit_price"]),
+                                min_charge=Decimal(l["min_charge"])
+                                if "min_charge" in l else None)
+                   for l in lines])
     return {
         "schema": RATE_CARD_SCHEMA, "rate_card_id": card_id,
         "customer_id": customer, "currency": "cny", "version": version,
-        "effective_from": "2026-10-01T00:00:00+08:00",
-        "effective_until": None, "lines": lines,
+        "effective_from": effective_from,
+        "effective_until": effective_until, "lines": lines,
         "signature": {"algorithm": "sha256", "snapshot_hash": snapshot_hash},
     }
 
@@ -344,6 +355,26 @@ def test_rate_card_parse_verify_and_tamper_detection():
     bad["signature"] = {"algorithm": "md5", "snapshot_hash": "sha256:x"}
     with pytest.raises(BillingSchemaError, match="sha256"):
         parse_rate_card(bad)
+
+
+def test_rate_card_hash_anchors_full_card_not_lines_only():
+    """D1-R7 终局轮（grok 红队）：快照 hash 扩面覆盖整卡——注册表文件被静默
+    改生效窗（拉长窗期即可对原窗外事件结算，绕过 out-of-window fail-closed）、
+    改客户归属/币种/版本/卡号，载入验签一律失配拒绝（此前 hash 只锚价格行，
+    这四类字段篡改后验签照样通过）。"""
+    card = parse_rate_card(_card_mapping())
+    for over in (
+        {"effective_until": "2099-12-31T00:00:00+08:00"},
+        {"effective_from": "2025-01-01T00:00:00+08:00"},
+        {"customer_id": "cust-other"},
+        {"currency": "usd"},
+        {"version": 2},
+        {"rate_card_id": "rc-cust-acme-20261101"},
+    ):
+        with pytest.raises(BillingSchemaError, match="snapshot hash mismatch"):
+            parse_rate_card({**_card_mapping(), **over})
+    # 基线对照：同卡重算一致（扩面不改"同输入同 hash"确定性）
+    assert verify_rate_card(card) == card.snapshot_hash
 
 
 # ── deterministic_settle ──────────────────────────────────────────────────────
@@ -423,11 +454,10 @@ def test_rate_change_does_not_alter_history():
     # v1 卡对象自始至终不可变：卡上价格与 v2 互不影响
     assert card_v1.lines[0].unit_price == Decimal("0.002")
     # 用 v2 重算 v1 的历史窗 → 生效窗 fail-closed 拒绝（历史账单不可被新卡悄悄覆盖）
-    v2_shifted = parse_rate_card({
-        **_card_mapping(unit_price="0.009", version=2,
-                        card_id="rc-cust-acme-overlap"),
-        "effective_from": "2026-09-01T00:00:00+08:00",
-        "effective_until": "2026-12-01T00:00:00+08:00"})
+    v2_shifted = parse_rate_card(_card_mapping(
+        unit_price="0.009", version=2, card_id="rc-cust-acme-overlap",
+        effective_from="2026-09-01T00:00:00+08:00",
+        effective_until="2026-12-01T00:00:00+08:00"))
     assert settlement_to_json(deterministic_settle(window, v2_shifted)) != original
     # select_rate_card 在重叠态显式报错（重叠在注册表里就是非法态）
     with pytest.raises(BillingSettleError, match="overlap"):
@@ -445,12 +475,12 @@ def test_rate_card_rejects_placeholder_customer():
 def test_select_rate_card_effective_windows():
     v1 = parse_rate_card(_card_mapping(
         card_id="rc-seq-1", version=1))                       # from 2026-10-01, open end
-    v1_closed = parse_rate_card({
-        **_card_mapping(card_id="rc-seq-1", version=1),
-        "effective_until": "2026-11-01T00:00:00+08:00"})
-    v2 = parse_rate_card({
-        **_card_mapping(unit_price="0.009", card_id="rc-seq-2", version=2),
-        "effective_from": "2026-11-01T00:00:00+08:00"})
+    v1_closed = parse_rate_card(_card_mapping(
+        card_id="rc-seq-1", version=1,
+        effective_until="2026-11-01T00:00:00+08:00"))
+    v2 = parse_rate_card(_card_mapping(
+        unit_price="0.009", card_id="rc-seq-2", version=2,
+        effective_from="2026-11-01T00:00:00+08:00"))
     at_v1 = v1_closed.effective_from + 60
     at_v2 = v2.effective_from + 60
     assert select_rate_card([v1_closed, v2], at=at_v1) is v1_closed
