@@ -125,7 +125,9 @@ def test_custom_guard_validates_parameters():
     nan = float("nan")
     for kwargs in ({"dedup_window_seconds": nan}, {"min_step_interval_seconds": nan},
                    {"dedup_window_seconds": float("inf")},
-                   {"min_step_interval_seconds": float("-inf")}):
+                   {"min_step_interval_seconds": float("-inf")},
+                   {"dedup_window_seconds": 10 ** 309},   # 巨型 int：isfinite 抛 OverflowError
+                   {"min_step_interval_seconds": 10 ** 400}):
         with pytest.raises(EscalationSchemaError):
             StormGuard(**kwargs)
 

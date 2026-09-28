@@ -147,13 +147,21 @@ class StormGuard:
         # R6/D1：NaN 经 ``nan < 0`` 恒 False 静默通过，随后 ``(now-last) < nan``
         # 恒 False ——两道风暴闸被静默关闭（fail-open 方向）；±inf 同拒（inf 方向
         # 虽 fail-closed，但非有限窗口不是合法配置，schema 层一并 fail-closed）。
+        # 巨型 int（如 10**309）经 math.isfinite 抛 OverflowError——按非有限同拒
+        # （grok 红队 R6 二轮发现，schema 错误不得变形为未归类崩溃）。
+        def _finite(v: object) -> bool:
+            try:
+                return math.isfinite(v)  # type: ignore[arg-type]
+            except OverflowError:
+                return False
+
         if (not isinstance(self.dedup_window_seconds, (int, float))
-                or not math.isfinite(self.dedup_window_seconds)
+                or not _finite(self.dedup_window_seconds)
                 or self.dedup_window_seconds < 0):
             raise EscalationSchemaError(
                 "dedup_window_seconds must be a finite non-negative number")
         if (not isinstance(self.min_step_interval_seconds, (int, float))
-                or not math.isfinite(self.min_step_interval_seconds)
+                or not _finite(self.min_step_interval_seconds)
                 or self.min_step_interval_seconds < 0):
             raise EscalationSchemaError(
                 "min_step_interval_seconds must be a finite non-negative number")
