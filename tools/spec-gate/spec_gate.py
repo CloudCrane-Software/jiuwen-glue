@@ -24,8 +24,10 @@ D6 结局一致性 与结局标签背离率 <5%         无结局数据（无 re
     python tools/spec-gate/spec_gate.py --static-only       # CI 环节9：仅 specs 静态
                                       一致性 + guardrail 例执行（六维全跑按需，太重）
 
-退出码：0 = 门禁过（含标 [待数据] 的维度——如实标注不算失败，但缺 D1/D2/D4/D5
-阈值或静态检查失败即非零）。
+退出码：0 = 门禁过（六维全部 PASS）。**空证据维度（D3 真实扇出未跑 / D6 无结局
+数据）= BLOCKED → 非零退出（1）**——v2.1 原则 2「空证据一律 UNKNOWN/BLOCKED，
+绝不默认放行」（D4-R2 修复：此前 [待数据] 维度不参与退出码，空证据被当作门禁
+通过）。有证据但不达阈值 = FAIL，同非零。``--static-only``（CI 环节9）语义不变。
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ VERDICTS = ("PASS", "BLOCKED", "UNKNOWN")
 EXHAUST_MAX_LEN = 4          # D1 穷举输入域：长度 0..4 的全部列表（3^0+…+3^4 = 121）
 THRESHOLD_DETERMINABILITY = 0.90   # §5.2：双实现一致率 ≥90%
 THRESHOLD_LETHALITY = 0.80         # §5.2：杀死率 ≥80%
+THRESHOLD_OUTCOME_DIVERGENCE = 0.05  # §5.2：结局背离率 <5%（D6）
 
 REPO = Path(__file__).resolve().parents[2]   # 仓库根（tools/spec-gate/spec_gate.py）
 
@@ -282,18 +285,60 @@ def dim_lethality(spec, red_cases):
 
 def dim_discrimination(red_cases):
     """D3 区分度：红绿分离 demo——参考实现全绿；旧实现与全部变异体至少一红。
-    如实声明：§5.2 原口径=分开过一次**真实扇出**，本首跑只有合成靶子 → 原口径 [待数据]。"""
+    §5.2 原口径=分开过一次**真实扇出**；本首跑只有合成靶子 → 原口径空证据 =
+    **BLOCKED**（D4-R2 修复：demo 过不再视为该维度通过——空证据不参与放行）。"""
     green_misses = [(c["input"], c["expect"], reference_aggregate(c["input"]))
                     for c in red_cases if reference_aggregate(c["input"]) != c["expect"]]
     old = old_impl()
     red_hits = [c["id"] for c in red_cases if old(tuple(c["input"])) != c["expect"]]
     mutant_hits = {name: sum(1 for i, e in [(c["input"], c["expect"]) for c in red_cases]
                              if fn(tuple(i)) != e) for name, fn in _mutants()}
+    separated = (not green_misses and len(red_hits) > 0
+                 and all(v > 0 for v in mutant_hits.values()))
+    # 真实扇出未接线（real_fanout=None）→ 原口径空证据，该维度 BLOCKED；
+    # demo 分离（demo_separated）仅作参考信号，不构成该维度通过（D4-R2）。
     return {"green_misses": green_misses, "old_impl_red_cases": red_hits,
             "mutant_red_counts": mutant_hits,
-            "separated": not green_misses and len(red_hits) > 0
-                         and all(v > 0 for v in mutant_hits.values()),
-            "real_fanout": "待数据"}
+            "demo_separated": separated,
+            "real_fanout": None,
+            "status": "BLOCKED",
+            "pass": False}
+
+
+def load_outcome_cases(path: Path) -> list:
+    """D6 结局一致性数据：evals/guardrail-aggregate/outcome_cases.jsonl（可缺——
+    零样本即空证据）。行形状：{"id", "input", "expect", "outcome_label"}，
+    outcome_label 与 expect 背离即一次结局背离。文件不存在/空 → []。"""
+    if not path.exists():
+        return []
+    cases = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        cases.append(json.loads(line))
+    return cases
+
+
+def dim_outcome_consistency(outcome_cases):
+    """D6 结局一致性：聚合结论与结局标签背离率 <5%（v2.1 §5.2 六维之末维）。
+
+    **零样本 = BLOCKED，绝不默认放行**（v2.1 原则 2；D4-R2 修复：此前 D6 标
+    [待数据] 却不参与退出码，空证据被当作门禁通过）。有样本时背离率 ≥5% = FAIL。"""
+    if not outcome_cases:
+        return {"samples": 0, "divergence": None, "status": "BLOCKED",
+                "reason": "无结局数据（outcome_cases.jsonl 缺失或 0 条）",
+                "pass": False}
+    divergent = [c for c in outcome_cases
+                 if c.get("expect") != c.get("outcome_label")]
+    rate = len(divergent) / len(outcome_cases)
+    return {"samples": len(outcome_cases),
+            "divergence": rate, "divergent": [
+                {"id": c.get("id"), "input": c.get("input"),
+                 "expect": c.get("expect"), "outcome_label": c.get("outcome_label")}
+                for c in divergent],
+            "status": "PASS" if rate < THRESHOLD_OUTCOME_DIVERGENCE else "FAIL",
+            "pass": rate < THRESHOLD_OUTCOME_DIVERGENCE}
 
 
 def old_impl():
@@ -378,6 +423,7 @@ def main(argv=None) -> int:
     gspec = parse_spec(repo / "specs" / "guardrail.spec.md")
     lspec = parse_spec(repo / "specs" / "leases.spec.md")
     red_cases = load_red_cases(repo / "evals" / "guardrail-aggregate" / "red_cases.jsonl")
+    outcome_cases = load_outcome_cases(repo / "evals" / "guardrail-aggregate" / "outcome_cases.jsonl")
 
     static_errors = static_consistency(gspec, lspec, red_cases)
     if args.static_only:
@@ -398,6 +444,7 @@ def main(argv=None) -> int:
     d2["pass"] = d2["d2a_spec_example_mutation"]["pass"] and d2["d2b_rule_mutation"]["pass"]
     d3 = dim_discrimination(red_cases)
     d5 = dim_red_proof(red_cases)
+    d6 = dim_outcome_consistency(outcome_cases)
 
     # D4：把前四维结果整体重算一遍比对（快照 A/B）
     def snapshot():
@@ -413,7 +460,7 @@ def main(argv=None) -> int:
     d4 = dim_stability(snap_a, snap_b)
 
     report = render_report(gspec, lspec, red_cases, static_errors,
-                           d1, d2, d3, d4, d5)
+                           d1, d2, d3, d4, d5, d6)
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -422,11 +469,29 @@ def main(argv=None) -> int:
     else:
         print(report)
 
-    ok = (not static_errors and d1["pass"] and d2["pass"] and d4["pass"] and d5["pass"])
-    return 0 if ok else 1
+    # 门禁结论（D4-R2）：六维全部 PASS 才过；空证据维度 = BLOCKED → 非零
+    # （v2.1 原则 2：空证据一律 UNKNOWN/BLOCKED，绝不默认放行）。
+    dims = (("D1", d1), ("D2", d2), ("D3", d3), ("D4", d4), ("D5", d5), ("D6", d6))
+    blocked = [name for name, d in dims
+               if not d["pass"] and d.get("status") == "BLOCKED"]
+    failed = [name for name, d in dims
+              if not d["pass"] and d.get("status") != "BLOCKED"]
+    if static_errors:
+        failed.append("静态一致性")
+    ok = not blocked and not failed
+    if ok:
+        print("门禁结论：PASS（六维全部通过）")
+        return 0
+    parts = []
+    if blocked:
+        parts.append("BLOCKED（空证据，不放行）: " + ", ".join(blocked))
+    if failed:
+        parts.append("FAIL: " + ", ".join(failed))
+    print("门禁结论：未通过 —— " + "；".join(parts))
+    return 1
 
 
-def render_report(gspec, lspec, red_cases, static_errors, d1, d2, d3, d4, d5):
+def render_report(gspec, lspec, red_cases, static_errors, d1, d2, d3, d4, d5, d6):
     pct = lambda x: f"{x * 100:.1f}%"
     L = []
     L.append("# W-05 spec-gate 六维元门禁首跑报告")
@@ -454,20 +519,29 @@ def render_report(gspec, lspec, red_cases, static_errors, d1, d2, d3, d4, d5):
         pct(d2["d2b_rule_mutation"]["rate"]), d2["d2b_rule_mutation"]["killed"],
         d2["d2b_rule_mutation"]["total"],
         "PASS" if d2["d2b_rule_mutation"]["pass"] else "FAIL"))
-    L.append("| D3 区分度 | 分开过一次**真实扇出** | 红绿分离 | demo：参考实现 {} 红；旧实现杀 {} 条红反例；8 变异体全灭={}。**真实扇出 [待数据]**（无候选扇出场景） | demo 过，原口径 [待数据] |".format(
+    L.append("| D3 区分度 | 分开过一次**真实扇出** | 红绿分离 | demo：参考实现 {} 红；旧实现杀 {} 条红反例；8 变异体全灭={}。**真实扇出未接线**（无候选扇出场景） | **BLOCKED**（原口径空证据，不放行；demo 分离={} 仅参考） |".format(
         len(d3["green_misses"]), len(d3["old_impl_red_cases"]),
-        "是" if all(v > 0 for v in d3["mutant_red_counts"].values()) else "否"))
+        "是" if all(v > 0 for v in d3["mutant_red_counts"].values()) else "否",
+        "是" if d3["demo_separated"] else "否"))
     L.append("| D4 稳定性 | 零抖动（全量重跑逐字节比对） | 完全一致 | {} | {} |".format(
         "两次运行结果完全一致（抖动 0）" if d4["identical"] else "**存在抖动**",
         "PASS" if d4["pass"] else "FAIL"))
     L.append("| D5 红证明 | 新 case 在旧实现断言失败 | 全部复现 | {}（{} 条 pre-w01 红反例对 6f4674c 快照） | {} |".format(
         "全部复现失败" if d5["pass"] and d5["checked"] else "未复现",
         len(d5["checked"]), "PASS" if d5["pass"] else "FAIL"))
-    L.append("| D6 结局一致性 | 与结局标签背离率 <5% | <5% | 无结局数据（无 revert/事故回填） | **[待数据]** |")
+    if d6["samples"] == 0:
+        L.append("| D6 结局一致性 | 与结局标签背离率 <5% | <5% | 无结局数据（无 revert/事故回填） | **BLOCKED**（空证据不放行，v2.1 原则 2） |")
+    else:
+        L.append("| D6 结局一致性 | 与结局标签背离率 <5% | <5% | {}（{} 样本，背离 {}） | {} |".format(
+            pct(d6["divergence"]), d6["samples"], len(d6["divergent"]),
+            "PASS" if d6["pass"] else "FAIL"))
     L.append("")
-    L.append("> 六维中四维实现并通过（D1/D2/D4/D5）；D3 原口径与 D6 如实标 [待数据]：")
-    L.append("> 区分度需要真实扇出（line 流水线后续工单），结局一致性需要结局标签回流，")
-    L.append("> 本首跑无该数据——不虚报。[待] 项消除条件已写入 docs/line-dogfood.md。")
+    L.append("> 六维门禁结论口径（D4-R2 修复）：D1/D2/D4/D5 已实现并通过；D3 原口径")
+    L.append("> （真实扇出）与 D6（结局标签回流）**空证据 = BLOCKED，门禁不放行**")
+    L.append("> （v2.1 原则 2：空证据一律 UNKNOWN/BLOCKED，绝不默认放行）。此前版本")
+    L.append("> 将 [待数据] 维度排除在退出码之外，空证据被当作门禁通过——已废弃。")
+    L.append("> [待] 项消除条件已写入 docs/line-dogfood.md；D6 样本经")
+    L.append("> evals/guardrail-aggregate/outcome_cases.jsonl 回流后自动转为可计算。")
     L.append("")
     L.append("## D1 可判定性：双独立实现一致率")
     L.append("")
@@ -521,7 +595,15 @@ def render_report(gspec, lspec, red_cases, static_errors, d1, d2, d3, d4, d5):
     L.append("")
     L.append("## D6 结局一致性")
     L.append("")
-    L.append("- **[待数据]**：需要生产结局标签（revert / 事故自动转红 case）回流后计算背离率；当前为零样本，无法计算也不得编造。")
+    if d6["samples"] == 0:
+        L.append("- **BLOCKED（空证据）**：需要生产结局标签（revert / 事故自动转红 case）"
+                 "回流后计算背离率；当前为零样本，无法计算也不得编造，**门禁不放行**。")
+    else:
+        L.append("- 样本 {}，背离率 {}（阈值 <5%）→ {}".format(
+            d6["samples"], pct(d6["divergence"]),
+            "PASS" if d6["pass"] else "**FAIL**"))
+        for x in d6["divergent"]:
+            L.append(f"  - 背离：{x}")
     L.append("")
     if static_errors:
         L.append("## 静态一致性错误")
