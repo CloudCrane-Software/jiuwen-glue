@@ -116,6 +116,16 @@ class UnknownEscalationCaseError(EscalationError):
 
 # ── 风暴防护三参数 + 组织学习阈值 ─────────────────────────────────────────────
 
+def _finite(v: object) -> bool:
+    """有限性闸：NaN/±inf 一律非有限；巨型 int（如 10**309）经 math.isfinite
+    抛 OverflowError——按非有限同拒（schema 错误不得变形为未归类崩溃；
+    D1-R6 PR#15 引入，R7 起提升为模块级供 escalate 的姊妹参数同口径复用）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except OverflowError:
+        return False
+
+
 @dataclass(frozen=True)
 class StormGuard:
     """风暴防护三参数（v2.1 §4.7"级内限次/回退≤1/签名去重"）+ 签名提案阈值
@@ -149,12 +159,6 @@ class StormGuard:
         # 虽 fail-closed，但非有限窗口不是合法配置，schema 层一并 fail-closed）。
         # 巨型 int（如 10**309）经 math.isfinite 抛 OverflowError——按非有限同拒
         # （grok 红队 R6 二轮发现，schema 错误不得变形为未归类崩溃）。
-        def _finite(v: object) -> bool:
-            try:
-                return math.isfinite(v)  # type: ignore[arg-type]
-            except OverflowError:
-                return False
-
         if (not isinstance(self.dedup_window_seconds, (int, float))
                 or not _finite(self.dedup_window_seconds)
                 or self.dedup_window_seconds < 0):
@@ -519,7 +523,7 @@ class EscalationLedger:
 
         拦截（全部拒绝 + 留痕，fail-closed）：
         - 缺 task_ref（MissingTaskReferenceError）/ 越过 L5 / 跳级；
-        - 增量未声明：time_budget_seconds ≤ 0；extras 携带 ``model`` 键
+        - 增量未声明：time_budget_seconds ≤ 0 或非有限（NaN/inf）；extras 携带 ``model`` 键
           （**升级的是权限/工具/上下文而非模型**）；
         - 风暴防护：同任务同签名在去重窗口内重复升级；
         - L4→L5：必须持 READY 的人类就绪包（字段不齐 BLOCKED 不放行）。
@@ -544,12 +548,16 @@ class EscalationLedger:
         from_idx = LEVELS.index(case.level)
         to_level = LEVELS[from_idx + 1]
 
-        # 时间预算是显式声明的一部分（>0）；增量字段存在即可（显式空 = 声明不加）。
-        if not isinstance(time_budget_seconds, (int, float)) or time_budget_seconds <= 0:
+        # 时间预算是显式声明的一部分（>0 且有限）；增量字段存在即可（显式空 = 声明不加）。
+        # R7/D1：NaN/±inf 经 ``nan <= 0`` 恒 False 静默入账——与 StormGuard 两浮点
+        # 参数（R6 已加固）同口径：非有限正数一律 EscalationSchemaError 拒绝
+        # （巨型 int 不再变形为 OverflowError 未归类崩溃）。
+        if not isinstance(time_budget_seconds, (int, float)) \
+                or not _finite(time_budget_seconds) or time_budget_seconds <= 0:
             self._log("ESCALATE_REJECTED", task_ref, reason="time budget not declared",
                       signature=sig)
             raise EscalationSchemaError(
-                "escalation must declare a positive time_budget_seconds")
+                "escalation must declare a positive finite time_budget_seconds")
 
         # 风暴防护补充②（grok 红队 R1-F3）：相邻两次升级的最小步进间隔——
         # 同 case 全局计数，不看签名与层级；去重窗口内"换层级秒级连跳 L0→L4"在此被拦。

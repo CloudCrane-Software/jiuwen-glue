@@ -16,6 +16,7 @@ docs/native-handbook-boundary-check.md）:
 """
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -52,6 +53,16 @@ def _utcnow() -> float:
     import time
 
     return time.time()
+
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 escalation.StormGuard 同口径）：NaN/±inf 一律非有限；
+    巨型 int（如 10**309）经 math.isfinite 抛 OverflowError——按非有限同拒，
+    schema 错误不得变形为未归类崩溃（D1-R6 PR#15 纪律）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except OverflowError:
+        return False
 
 
 @dataclass
@@ -147,14 +158,22 @@ class ChallengeBoard:
              guardrail_run_ref: Optional[str] = None,
              tenant_id: str = "t0",
              meta: Optional[Dict[str, Any]] = None) -> Challenge:
-        """发起一条结构化授权要求。ttl_seconds 必须为正（无有效期的 Challenge 不允许存在）。"""
+        """发起一条结构化授权要求。ttl_seconds 必须为正的有限数（无有效期/
+        永不过期的 Challenge 不允许存在——NaN/±inf 使过期闸 fail-open）。"""
         if who_confirms not in _WHO:
             raise ChallengeStateError(
                 f"who_confirms must be one of {_WHO}, got {who_confirms!r}")
         if not resource or not action or not method:
             raise ChallengeStateError("resource / action / method are required")
-        if not isinstance(ttl_seconds, (int, float)) or ttl_seconds <= 0:
-            raise ChallengeStateError("ttl_seconds must be a positive number")
+        # R7/D1：NaN 经 ``nan <= 0`` 恒 False 静默通过 → expires_at=nan →
+        # is_expired_at（now >= nan 恒 False）永不触发，过期闸 fail-open；
+        # ±inf 同理永不过期；巨型 int 经 now+ttl 的 float 转换抛未归类
+        # OverflowError——三者按「非有限正数」同拒（fail-closed）。
+        if not isinstance(ttl_seconds, (int, float)) or not _finite(ttl_seconds) \
+                or ttl_seconds <= 0:
+            raise ChallengeStateError(
+                "ttl_seconds must be a positive finite number "
+                "(NaN/inf never expire — an endless challenge is not allowed)")
         now = self._now()
         ch = Challenge(
             challenge_id=uuid.uuid4().hex, who_confirms=who_confirms,

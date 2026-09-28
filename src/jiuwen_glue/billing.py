@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -53,6 +54,16 @@ from typing import (Iterable, Mapping, Optional, Sequence, Tuple)
 from .errors import BillingSchemaError, BillingSettleError
 from .usage import (SETTLEMENT_CLASSES, SETTLEMENT_INTERNAL, USAGE_KINDS,
                     UsageSchemaError)
+
+
+def _finite(v: object) -> bool:
+    """有限性闸（与 escalation.StormGuard / challenge 同口径）：NaN/±inf 一律
+    非有限；巨型 int 经 math.isfinite 抛 OverflowError——按非有限同拒（D1-R6
+    PR#15 纪律：schema 错误不得变形为未归类崩溃）。"""
+    try:
+        return math.isfinite(v)  # type: ignore[arg-type]
+    except OverflowError:
+        return False
 
 __all__ = [
     "SETTLEMENT_CLASSES", "SETTLEMENT_INTERNAL",
@@ -181,11 +192,16 @@ class UsageEventRow:
                 f"usage kind must be one of {USAGE_KINDS}, got {self.kind!r}")
         if isinstance(self.quantity, bool) or \
                 not isinstance(self.quantity, (int, float)) or \
+                not _finite(self.quantity) or \
                 not self.quantity >= 0:
             raise BillingSchemaError(
-                f"quantity must be a number >= 0, got {self.quantity!r}")
-        if self.occurred_at < 0:
-            raise BillingSchemaError("occurred_at must be a non-negative epoch")
+                f"quantity must be a finite number >= 0, got {self.quantity!r}")
+        # R7/D1：occurred_at 非有限（NaN/±inf/巨型 int）使半开窗判定
+        # ``nan < start``/``nan >= end`` 双双 False——同一事件落进每一个窗口，
+        # 不相交窗重复计费，「可重算」不变式破缺；构造期即拒（fail-closed）。
+        if not _finite(self.occurred_at) or self.occurred_at < 0:
+            raise BillingSchemaError(
+                "occurred_at must be a finite non-negative epoch")
         if self.settlement_class not in SETTLEMENT_CLASSES:
             raise BillingSchemaError(
                 f"settlement_class must be one of {SETTLEMENT_CLASSES}, "
@@ -359,7 +375,14 @@ class ProjectUsage:
 
 
 def _in_window(event: object, start: Optional[float], end: Optional[float]) -> bool:
+    # R7/D1：非有限时间戳无法落入任何确定的半开窗（nan 与一切比较均为 False
+    # → 原实现使其落入**每一个**窗口，不相交窗重复计费）——duck-typed 装载
+    # 路径（aggregate_by_project 的 SimpleNamespace 契约）与行构造同口径
+    # fail-closed：拒算而非多计/漏计（billing 不允许含糊）。
     at = float(getattr(event, "occurred_at", 0.0) or 0.0)
+    if not math.isfinite(at):
+        raise BillingSchemaError(
+            f"event occurred_at must be a finite epoch to be windowed, got {at!r}")
     if start is not None and at < start:
         return False
     if end is not None and at >= end:
@@ -488,8 +511,11 @@ def weekly_report(events: Iterable[object], *, start: float, end: float,
     （resources/ 档案 ``shadow_pricing`` 段投影）。窗口为半开区间
     ``[start, end)``；空输入同样出全部表头（周报骨架恒完整）。
     """
-    if end <= start:
-        raise BillingSchemaError(f"report window end must be after start, got {end} <= {start}")
+    # R7/D1：窗口边界非有限时 ``end <= start`` 对 NaN 恒 False 静默放行，
+    # 半开窗语义失效——与事件侧同口径 fail-closed（报告窗口必须确定可分）。
+    if not _finite(start) or not _finite(end) or end <= start:
+        raise BillingSchemaError(
+            f"report window must be finite with end after start, got {start!r} ~ {end!r}")
     materialized = tuple(events)
     usage_all = aggregate_by_project(materialized, start=start, end=end)
     excluded = sum(1 for e in materialized if not _in_window(e, start, end))
