@@ -1,0 +1,21 @@
+#!/bin/sh
+# crane-tui — 治理面作战室 TUI 一键启动（srv-1，线E 2026-09-29）
+# owner 用法：ssh newbox 后任意目录敲 `crane-tui`（无 CONSOLE_TUI_DSN 时自动退 mock 演示模式）。
+# 纪律：DSN 只存在于 /opt/company-ops/coldstart/tui.env（root 0600），本脚本零打印、
+#       不回显任何密钥；探针目标非密钥，随 env 一并加载。
+set -e
+TUI_ENV=/opt/company-ops/coldstart/tui.env
+VENV_PY=/opt/company-ops/console-tui-venv/bin/python
+
+if [ ! -r "$TUI_ENV" ]; then
+    echo "crane-tui: 缺 $TUI_ENV（安装见 jiuwen-glue 仓 tools/console-tui/deploy/README-srv1.md）" >&2
+    exit 1
+fi
+if [ ! -x "$VENV_PY" ]; then
+    echo "crane-tui: 缺 venv $VENV_PY（安装见同 README）" >&2
+    exit 1
+fi
+set -a
+. "$TUI_ENV"
+set +a
+exec "$VENV_PY" -m console_tui

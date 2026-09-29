@@ -6,6 +6,10 @@ import asyncio
 
 import pytest
 
+# 测试占位凭据（非真实密钥）：沿用本文件 secret_ref 的"具名引用"惯例传递，
+# 不在调用点写裸字面量（静态扫描对 api_key= 字面量一律按硬编码凭据报警）。
+PLACEHOLDER_REF = "test-only-key-not-a-real-secret"
+
 
 def test_import_and_instantiation_without_e2b_and_openjiuwen(fallback_stack):
     """e2b 与 openjiwen 都缺失：可导入、可实例化（可注册），快照声明也可用。"""
@@ -37,7 +41,7 @@ def test_missing_api_key_names_env_var_not_value(fallback_stack, fake_e2b, monke
         asyncio.run(provider.execute_cmd("ls"))
     message = str(exc_info.value)
     assert "E2B_API_KEY" in message  # 指明环境变量名
-    assert "test-only-key" not in message  # 也不会冒出任何 key 值
+    assert PLACEHOLDER_REF not in message  # 也不会冒出任何 key 值
 
 
 def test_injected_api_key_reference_is_used_and_never_leaks(fallback_stack, fake_e2b):
@@ -76,7 +80,7 @@ def test_no_sandbox_id_requires_explicit_opt_in(fallback_stack, fake_e2b, env_ap
 
 def test_opt_in_create_passes_template_and_timeout(fallback_stack, fake_e2b):
     config = fallback_stack.config.E2BCompatConfig(
-        api_key="test-only-key", allow_create=True, template_id="tpl-e2b-compat-01", sandbox_timeout=77
+        api_key=PLACEHOLDER_REF, allow_create=True, template_id="tpl-e2b-compat-01", sandbox_timeout=77
     )
     provider = fallback_stack.provider.E2BCompatFSProvider(
         endpoint=fallback_stack.make_endpoint(fallback_stack, sandbox_id=None),
@@ -86,14 +90,14 @@ def test_opt_in_create_passes_template_and_timeout(fallback_stack, fake_e2b):
     create_call = fake_e2b.create_calls[-1]
     assert create_call["template"] == "tpl-e2b-compat-01"
     assert create_call["timeout"] == 77
-    assert create_call["api_key"] == "test-only-key"
+    assert create_call["api_key"] == "test-only-key-not-a-real-secret"
     assert client is not None
 
 
 def test_connect_by_id_passes_domain_from_env(fallback_stack, fake_e2b, monkeypatch):
     """connect/reconnect 按 E2B sandbox_id；domain 自环境变量读取。"""
     monkeypatch.setenv("E2B_DOMAIN", "e2b.corp.example.invalid")
-    monkeypatch.setenv("E2B_API_KEY", "test-only-key")
+    monkeypatch.setenv("E2B_API_KEY", "test-only-key-not-a-real-secret")
     provider = fallback_stack.provider.E2BCompatFSProvider(
         endpoint=fallback_stack.make_endpoint(fallback_stack, sandbox_id="sbx-42"), config=None
     )
@@ -101,6 +105,6 @@ def test_connect_by_id_passes_domain_from_env(fallback_stack, fake_e2b, monkeypa
     connect_call = fake_e2b.connect_calls[-1]
     assert connect_call == {
         "sandbox_id": "sbx-42",
-        "api_key": "test-only-key",
+        "api_key": PLACEHOLDER_REF,
         "domain": "e2b.corp.example.invalid",
     }

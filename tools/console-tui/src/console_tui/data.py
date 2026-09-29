@@ -48,6 +48,7 @@ from .state import (CARD_PENDING, CH_PENDING, KIND_APPROVE, KIND_DENY, KIND_ESCA
                     AdjudicationResolutionError, ChallengeResolutionError, UnknownTargetError,
                     apply_pause, audit_event, canonical_hash, resolve_adjudication_state,
                     resolve_challenge_state, utcnow)  # noqa: F401 (OPERATOR=写路径默认裁决人)
+from .intake import TaskDraft  # noqa: F401 (下单草稿形态；intake 不回引本模块，无环)
 
 DSN_ENV = "CONSOLE_TUI_DSN"
 
@@ -125,6 +126,8 @@ class NodeRow:
     trust_level: str
     max_parallel: int
     online_window: str
+    heartbeat_at: Optional[float] = None     # glue.node_heartbeat.seen_at（线E；None=无心跳）
+    heartbeat_version: str = ""              # 心跳携带的 worker 版本（展示用）
 
 
 @dataclass(frozen=True)
@@ -250,13 +253,14 @@ class AgentColumn:
 
 @dataclass(frozen=True)
 class PoolSummary:
-    """顶部状态栏的节点池利用率汇总（nodes 的 gpu_frac 占用）。"""
+    """顶部状态栏的节点池利用率汇总（nodes 的 gpu_frac 占用 + 心跳在线数，线E）。"""
 
     node_count: int
     gpu_frac_total: float
     gpu_frac_trusted: float
     untrusted_count: int
     max_parallel_total: int
+    heartbeat_online: int = 0        # 心跳在窗（fresh）节点数（None 心跳不计入）
 
 
 @dataclass(frozen=True)
@@ -301,8 +305,17 @@ def derive_agents(tasks: Sequence[TaskRow], now: float) -> List[AgentColumn]:
     return cols
 
 
-def summarize_nodes(nodes: Sequence[NodeRow]) -> PoolSummary:
-    """节点池利用率汇总：gpu_frac 占用合计、可信占比、不可信节点数。"""
+def summarize_nodes(nodes: Sequence[NodeRow], now: Optional[float] = None) -> PoolSummary:
+    """节点池利用率汇总：gpu_frac 占用合计、可信占比、不可信节点数、心跳在线数。
+
+    心跳在窗判定与展示层 _HEARTBEAT_WARN 同窗（900s，仅展示，不做治理决策）；
+    now 为 None 时不计心跳（保持旧调用形状兼容）。
+    """
+    if now is None:
+        online = 0
+    else:
+        online = sum(1 for n in nodes if n.heartbeat_at is not None
+                     and (now - n.heartbeat_at) <= 900.0)
     return PoolSummary(
         node_count=len(nodes),
         gpu_frac_total=round(sum(n.gpu_frac for n in nodes), 4),
@@ -310,6 +323,7 @@ def summarize_nodes(nodes: Sequence[NodeRow]) -> PoolSummary:
                                    if n.trust_level == "trusted"), 4),
         untrusted_count=sum(1 for n in nodes if n.trust_level == "untrusted"),
         max_parallel_total=sum(n.max_parallel for n in nodes),
+        heartbeat_online=online,
     )
 
 
@@ -363,11 +377,20 @@ class ConsoleStore:
     def agents(self) -> List[AgentColumn]:
         return derive_agents(self.tasks(), utcnow())
     def pool_summary(self) -> PoolSummary:
-        return summarize_nodes(self.nodes())
+        return summarize_nodes(self.nodes(), utcnow())
     def now(self) -> float:
         """取数时钟（mock 可注入；pg 用 wall clock）。"""
         return utcnow()
     def audit_trail(self, limit: int = 50) -> List[AuditEntry]: raise NotImplementedError
+
+    # ── 下单（线E，n 键；创建新对象，不是干预——留痕=工单行+transition）──────
+    def create_task(self, draft: "TaskDraft", by: str = OPERATOR) -> AuditEntry:
+        """下单：draft 落 team_task（state='PENDING', owner=NULL）+ 留痕事件。
+
+        draft 来自 intake.decompose（RULES 分解）；executable=False 的草稿同样
+        落库（deliverable 用 manual handler——worker 拒绝执行→BLOCKED，等人工拆）。
+        """
+        raise NotImplementedError
 
     # ── 三级干预（s/a/p；全部留痕）─────────────────────────────────────────
     def steer(self, agent_ref: str, text: str, by: str = OPERATOR) -> AuditEntry:
@@ -452,8 +475,10 @@ def default_mock_seed(now: float) -> Tuple[List[TaskRow], List[LeaseRow],
                     "higress", "evidence://ev-9", "", {"route": "model"}),
     ]
     nodes = [
-        NodeRow("srv-1", 0.8, 0.5, ("shell", "pg", "higress"), "trusted", 4, "always"),
-        NodeRow("work-01", 1.0, 1.0, ("shell", "vllm"), "trusted", 2, "09:00-18:00+08"),
+        NodeRow("srv-1", 0.8, 0.5, ("shell", "pg", "higress"), "trusted", 4, "always",
+                heartbeat_at=now - 45.0, heartbeat_version="windev-worker/0.1"),
+        NodeRow("work-01", 1.0, 1.0, ("shell", "vllm"), "trusted", 2, "09:00-18:00+08",
+                heartbeat_at=now - 1800.0, heartbeat_version="gpu-worker/0.0"),
         NodeRow("edge-relay", 0.3, 0.0, ("curl",), "untrusted", 1, "always"),
     ]
     usage = [
@@ -570,6 +595,23 @@ class MockConsoleStore(ConsoleStore):
     def audit_trail(self, limit: int = 50) -> List[AuditEntry]:
         return list(self._audit[-limit:])
 
+    # ── 下单（线E，n 键）：草稿 → PENDING 工单 + 审计事件 ──────────────────
+    def create_task(self, draft: TaskDraft, by: str = OPERATOR) -> AuditEntry:
+        if not isinstance(draft, TaskDraft) or not draft.title.strip():
+            raise GovernanceError("create_task requires a non-empty TaskDraft")
+        now = self._now()
+        task_id = str(uuid.uuid4())
+        self._tasks.append(TaskRow(
+            task_id=task_id, title=draft.title.strip(), owner="", state="PENDING",
+            deliverable=draft.deliverable, run_ref="", artifact_ref="",
+            created_at=now, last_transition_at=now))
+        event = AuditEntry(now, "create_order", task_id, by,
+                           {"title": draft.title.strip(), "template": draft.template,
+                            "kind": draft.kind_label, "executable": draft.executable,
+                            "state": "PENDING"})
+        self._audit.append(event)
+        return event
+
     # ── 干预：s steer ─────────────────────────────────────────────────────
     def steer(self, agent_ref: str, text: str, by: str = OPERATOR) -> AuditEntry:
         if not text or not text.strip():
@@ -671,7 +713,8 @@ class PgConsoleStore(ConsoleStore):
                     " rationale_ref, guardrail_run_ref, meta FROM glue.v_recent_decision"
                     " WHERE tenant_id = %s ORDER BY ts DESC LIMIT %s")
     _Q_NODES = ("SELECT node_id, cpu_frac, gpu_frac, tools, trust_level, max_parallel,"
-                " online_window FROM glue.v_node_utilization WHERE tenant_id = %s"
+                " online_window, hb_seen_at, hb_version"
+                " FROM glue.v_node_utilization WHERE tenant_id = %s"
                 " ORDER BY node_id")
     _Q_USAGE = ("SELECT kind, events, total_quantity, first_at, last_at"
                 " FROM glue.v_usage WHERE tenant_id = %s ORDER BY kind")
@@ -712,6 +755,16 @@ class PgConsoleStore(ConsoleStore):
     _Q_AUDIT = ("SELECT ts, chosen, meta FROM glue.v_recent_decision"
                 " WHERE tenant_id = %s AND meta->>'intervention' IS NOT NULL"
                 " ORDER BY ts DESC LIMIT %s")
+    # 下单写路径（线E，n 键）：team_task INSERT（PENDING/owner=NULL）+
+    # task_transition（NULL→PENDING, source='admin'）双 INSERT；全部 %s 参数化。
+    # 001 的 team_task_guard 触发器兜底 PENDING 无需 run_ref（只对 COMPLETED 要求）。
+    _Q_TASK_INSERT = ("INSERT INTO glue.team_task (task_id, title, owner, deliverable,"
+                      " state, tenant_id)"
+                      " VALUES (%s, %s, NULL, %s, 'PENDING', %s)")
+    _Q_TASK_CREATE_TRANSITION = ("INSERT INTO glue.task_transition"
+                                 " (task_id, from_state, to_state, source, executor,"
+                                 "  note, tenant_id)"
+                                 " VALUES (%s, NULL, 'PENDING', 'admin', %s, %s, %s)")
 
     def __init__(self, conn: Any, *, tenant_id: str = "t0") -> None:
         # conn 为 psycopg connection（或满足 cursor()/commit() 协议的对象——测试用桩）。
@@ -773,7 +826,9 @@ class PgConsoleStore(ConsoleStore):
         for r in rows:
             tools = r[3] if isinstance(r[3], (list, tuple)) else json.loads(r[3] or "[]")
             out.append(NodeRow(r[0], float(r[1]), float(r[2]), tuple(tools), r[4],
-                               int(r[5]), r[6]))
+                               int(r[5]), r[6],
+                               heartbeat_at=self._ts(r[7]) if r[7] is not None else None,
+                               heartbeat_version=str(r[8] or "")))
         return out
 
     def usage(self) -> List[UsageRow]:
@@ -815,6 +870,23 @@ class PgConsoleStore(ConsoleStore):
         rows = self._exec(self._Q_AUDIT, [self._tenant, int(limit)], fetch="all")
         return [AuditEntry(self._ts(r[0]), r[1], r[2].get("target", ""), r[2].get("by", ""),
                            r[2] if isinstance(r[2], dict) else {}) for r in rows]
+
+    # ── 下单（线E，n 键）：INSERT team_task + admin transition ─────────────
+    def create_task(self, draft: TaskDraft, by: str = OPERATOR) -> AuditEntry:
+        if not isinstance(draft, TaskDraft) or not draft.title.strip():
+            raise GovernanceError("create_task requires a non-empty TaskDraft")
+        task_id = str(uuid.uuid4())
+        title = draft.title.strip()
+        self._exec(self._Q_TASK_INSERT,
+                   [uuid.UUID(task_id), title, draft.deliverable, self._tenant])
+        self._exec(self._Q_TASK_CREATE_TRANSITION,
+                   [uuid.UUID(task_id), by,
+                    f"order intake via console-tui (template={draft.template})",
+                    self._tenant])
+        return AuditEntry(utcnow(), "create_order", task_id, by,
+                          {"title": title, "template": draft.template,
+                           "kind": draft.kind_label, "executable": draft.executable,
+                           "state": "PENDING"})
 
     # ── 干预：s steer（pg 写一条 type=steer 的 decision_record）───────────
     def steer(self, agent_ref: str, text: str, by: str = OPERATOR) -> AuditEntry:

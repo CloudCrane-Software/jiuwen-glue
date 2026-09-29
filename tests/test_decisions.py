@@ -56,7 +56,9 @@ def test_append_only_no_update_or_delete_api(clock):
     forbidden = ("update", "delete", "remove", "set_", "replace", "amend", "rewrite")
     names = [n for n in dir(log) if not n.startswith("_")]
     assert not any(any(f in n.lower() for f in forbidden) for n in names)
-    assert set(names) == {"append", "get", "all", "by_agent", "by_context"}
+    # record_outcome：G-1 终态回填（v2.0 §4.2），受控单字段一次写入——迁移显式声明（§3.5 负边界资产），
+    # 禁改写语义由 test_g1_outcome_backfill.py::test_outcome_rewrite_rejected 锁定
+    assert set(names) == {"append", "get", "all", "by_agent", "by_context", "record_outcome"}
     with pytest.raises(Exception):
         # frozen dataclass：属性不可变
         rec.chosen = "reject"  # type: ignore[misc]

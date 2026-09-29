@@ -208,3 +208,44 @@ def test_pause_state_survives_restart_like_reinstantiation(store):
               if d.meta.get("intervention") in ("pause", "resume")
               and d.meta.get("target") == "tsk-001"]
     assert replay and replay[-1].meta["intervention"] == KIND_PAUSE
+
+
+# ── 下单（线E，n 键）：draft → PENDING 工单 + 审计（mock 后端）────────────────
+
+def test_create_task_lands_pending_unowned(store):
+    from console_tui.intake import decompose
+    (draft,) = decompose("整理本周周报", now=store.now())
+    event = store.create_task(draft, by="console:operator")
+    assert event.kind == "create_order" and event.detail["state"] == "PENDING"
+    (row,) = [t for t in store.tasks() if t.task_id == event.target]
+    assert row.state == "PENDING"
+    assert row.owner in ("", None)                      # worker 自取口径：owner 空可认领
+    assert row.run_ref == "" and row.artifact_ref == ""
+    assert row.created_at == row.last_transition_at == store.now()
+
+
+def test_create_task_manual_draft_keeps_full_instruction(store):
+    from console_tui.intake import decompose
+    (draft,) = decompose("给 eval-gate 加个 README 徽章", now=store.now())
+    event = store.create_task(draft)
+    (row,) = [t for t in store.tasks() if t.task_id == event.target]
+    assert draft.deliverable in row.deliverable         # 完整指令在 deliverable 里可人工拆
+
+
+def test_create_task_rejects_empty_draft(store):
+    with pytest.raises(GovernanceError):
+        store.create_task(None)
+
+
+def test_created_task_feeds_tower_derivation_and_claim_visibility(store, clock):
+    """下单→认领→塔列推导仍自洽（derive_agents 输入不变式）。"""
+    from console_tui.intake import decompose
+    (draft,) = decompose("[worker-smoke] 出一版周报草稿", now=clock())
+    event = store.create_task(draft)
+    rows = store.tasks()
+    (row,) = [t for t in rows if t.task_id == event.target]
+    claimed = row.__class__(**{**row.__dict__, "state": "CLAIMED",
+                               "owner": "windev-worker"})
+    store._tasks[store._tasks.index(row)] = claimed
+    agents = {a.agent_ref: a for a in store.agents()}
+    assert agents["windev-worker"].status == "working"  # 认领后塔列立即可见

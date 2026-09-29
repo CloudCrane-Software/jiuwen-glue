@@ -245,3 +245,52 @@ def test_connect_pg_failure_never_echoes_dsn(monkeypatch):
 def test_pg_store_repr_leaks_no_connection_details():
     store = PgConsoleStore(StubConn())
     assert "StubConn" not in repr(store) and "dsn" not in repr(store).lower()
+
+
+# ── 下单写路径（线E，n 键）：team_task INSERT + admin transition，全参数化 ─────
+
+def test_pg_create_task_inserts_pending_unowned_with_transition():
+    from console_tui.intake import decompose
+    conn = StubConn()
+    (draft,) = decompose("[worker-smoke] 出一版周报草稿", now=time.time())
+    event = PgConsoleStore(conn).create_task(draft, by="console:operator")
+    assert event.kind == "create_order" and event.detail["state"] == "PENDING"
+    assert len(conn.log) == 2 and conn.commits == 2
+    insert_sql, insert_params = conn.log[0]
+    assert "INSERT INTO glue.team_task" in insert_sql
+    assert insert_sql.count("%s") == 4
+    task_uuid, title, deliverable, tenant = insert_params
+    assert str(task_uuid) == event.target
+    assert title.startswith("[worker-smoke] [周报]")
+    assert json.loads(deliverable)["handler"] == "report"
+    assert tenant == "t0"
+    trans_sql, trans_params = conn.log[1]
+    assert "INSERT INTO glue.task_transition" in trans_sql
+    assert trans_sql.count("%s") == 4                  # from_state/to_state/source 是字面量
+    t_uuid, executor, note, t_tenant = trans_params
+    assert str(t_uuid) == event.target and executor == "console:operator"
+    assert "template=weekly_report" in note and t_tenant == "t0"
+
+
+def test_pg_create_task_rejects_empty_draft_without_sql():
+    from console_tui.state import GovernanceError
+    conn = StubConn()
+    with pytest.raises(GovernanceError):
+        PgConsoleStore(conn).create_task(None)
+    assert conn.log == [] and conn.commits == 0        # 拒绝发生在任何 SQL 之前
+
+
+def test_pg_nodes_query_reads_heartbeat_projection():
+    """节点面板（线E）：v_node_utilization 带心跳列（003 v2），NULL 心跳 → None。"""
+    ts = datetime.datetime.fromtimestamp(time.time())
+    conn = StubConn(queue=[([
+        ("srv-1", 0.8, 0.5, ["shell"], "trusted", 4, "always", ts, "w/0.1"),
+        ("edge", 0.3, 0.0, [], "untrusted", 1, "always", None, None),
+    ], 0)])
+    rows = PgConsoleStore(conn).nodes()
+    assert rows[0].heartbeat_at is not None and rows[0].heartbeat_version == "w/0.1"
+    assert rows[1].heartbeat_at is None and rows[1].heartbeat_version == ""
+    sql, params = conn.log[0]
+    assert "hb_seen_at" in sql and "glue.v_node_utilization" in sql
+    assert params == ("t0",)
+
