@@ -18,7 +18,7 @@ import copy
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclasses_replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .errors import DecisionSchemaError, UnknownDecisionError
@@ -51,6 +51,12 @@ class DecisionRecord:
     guardrail_run_ref: Optional[str] = None   # 绑定的 GuardrailRun（门控在先，决策在后）
     tenant_id: str = "t0"
     meta: Mapping[str, Any] = field(default_factory=dict)
+    # outcome：终态回填（W-02 G-1 / v2.0 §4.2 "决策记录含 outcome 回填字段"）。
+    # append-only 语义下的受控单字段终态登记：NULL=未回填（决策尚无结局）；
+    # 首次 record_outcome 写入即冻结（再次回填任何值→DecisionSchemaError，无改写路径）。
+    # 形状约定（docs/decision-layer.md §outcome）：{"outcome": "success|failure|superseded",
+    # "evidence_ref": str, "ts": float, "note": str?}——结构校验在此层，语义归消费方。
+    outcome: Optional[Mapping[str, Any]] = None
 
 
 class DecisionLog:
@@ -105,6 +111,26 @@ class DecisionLog:
             return self._records[decision_id]
         except KeyError:
             raise UnknownDecisionError(f"unknown decision: {decision_id}") from None
+
+    def record_outcome(self, decision_id: str, outcome: Mapping[str, Any]) -> DecisionRecord:
+        """终态回填（G-1，append-only 语义内的受控单字段）。
+
+        规则（写死，tests/test_decisions.py 锁定）：
+        - 仅允许一次：已有 outcome 的记录再次回填 → DecisionSchemaError（终态不可改）；
+        - 结构最小校验：必须为含 "outcome" 与 "evidence_ref" 的映射（语义归消费方）；
+        - 落库即冻结（dataclass_replace 生成新冻结记录，原对象不可变语义保持）。
+        """
+        rec = self.get(decision_id)
+        if rec.outcome is not None:
+            raise DecisionSchemaError(
+                f"decision {decision_id} already has an outcome (append-only; "
+                "no rewrite path exists)")
+        if not isinstance(outcome, Mapping) or "outcome" not in outcome or "evidence_ref" not in outcome:
+            raise DecisionSchemaError(
+                "outcome must be a mapping with 'outcome' and 'evidence_ref' keys")
+        updated = dataclasses_replace(rec, outcome=copy.deepcopy(dict(outcome)))
+        self._records[decision_id] = updated
+        return updated
 
     def all(self) -> List[DecisionRecord]:
         """全部记录（落账顺序；append-only 视图）。"""

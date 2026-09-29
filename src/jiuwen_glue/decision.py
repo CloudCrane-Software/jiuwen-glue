@@ -577,6 +577,18 @@ class DecisionLayer:
             tenant_id=tid, meta=meta)
         return (outcome.value, outcome.rationale_ref, rec.decision_id)
 
+    # ── outcome 回填（G-1 / v2.0 §4.2）────────────────────────────────────
+    # 接线约定：三原语的调用方在拿到决策的**结局**（任务成功/失败/被取代）后，
+    # 显式调本门面回填——决策层只提供受控登记，不推断结局（决策点唯一不外溢）。
+
+    def record_outcome(self, decision_ref: str, outcome: Mapping[str, Any]) -> None:
+        """终态回填门面：转发 DecisionLog.record_outcome（一次即冻结）。"""
+        self._log.record_outcome(decision_ref, outcome)
+
+    def outcome_of(self, decision_ref: str) -> Optional[Mapping[str, Any]]:
+        """查询某决策的终态（未回填为 None）。"""
+        return self._log.get(decision_ref).outcome
+
 
 # ── 注入点 1：promotion.score_hook 适配（§4.7 第六植入点，唯一交叉点）────────
 

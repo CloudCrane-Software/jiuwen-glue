@@ -101,6 +101,9 @@ FROM glue.decision_record d;
 -- 5) 节点利用率：每节点一行（字段与 002 glue.node 对齐）；顶部状态栏的
 --    gpu_frac 占用汇总（合计/可信/不可信计数）由 data.py summarize_nodes 现算，
 --    不在本视图物化——避免与调度器（WO-0011）将来引入的真实占用表打架。
+--    [线E v2 2026-09-29] 追加 node_heartbeat 心跳投影（hb_seen_at/hb_version）：
+--    每节点取最近一行心跳（无心跳行 → NULL，展示为"-"）；只读，不物化判定
+--    （在窗/超窗的展示语义由 data.py/app 层现算，决策点唯一）。
 CREATE OR REPLACE VIEW glue.v_node_utilization AS
 SELECT n.tenant_id,
        n.node_id,
@@ -110,5 +113,14 @@ SELECT n.tenant_id,
        n.trust_level,
        n.max_parallel,
        n.online_window,
-       n.registered_at
-FROM glue.node n;
+       n.registered_at,
+       hb.seen_at                            AS hb_seen_at,
+       hb.version                            AS hb_version
+FROM glue.node n
+LEFT JOIN LATERAL (
+    SELECT h.seen_at, h.version
+    FROM glue.node_heartbeat h
+    WHERE h.tenant_id = n.tenant_id AND h.node_id = n.node_id
+    ORDER BY h.seen_at DESC
+    LIMIT 1
+) hb ON TRUE;
