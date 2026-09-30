@@ -1,0 +1,770 @@
+# jiuwen-glue gates registry (v0.9)
+# GP §4.1 门禁注册表 — 全部门禁单一事实源
+# 收敛规则 R-S / R-E / R-L / R-O 见顶层 convergence_rules 节
+# 变更: PR + 元资产人审 (TR-H 映射 → 四类硬清单)
+
+schema_version: "gates-registry/0.9"
+description: >
+  jiuwen-glue 现有门禁全量注册表（GP §4.1 schema 全字段；v0.9 = 初始盘点版）。
+  layer/tier/mode 枚举严格按 GP §4.1 / §4.2；write_time_mirror 指向 L0 最左可执行位。
+last_updated: "2026-09-30"
+
+convergence_rules:
+  R_S: "converge 报告 Converged + checklist 全绿 + 多 judge κ≥0.75（CP-1）"
+  R_E: "统计功效先算 CI 宽度再定 N；eval 未成熟模块不得进 TR-2 以上自动合入（CP-2）"
+  R_L: "churn 高而 eval 未动 → 打标 → 自动生成资产刷新扇出任务（CP-3）"
+  R_O: "判官入职测试复用漂移案例；错误消息质量 lint 入候选（可选优化 O-5/O-6）"
+
+gates:
+
+  # ──────────────────────────────────────────────────────────────
+  # T0 秒级突发（≤30s，push 并行）
+  # ──────────────────────────────────────────────────────────────
+  - id: spec-gate-static
+    title: spec-gate 静态一致性（D1/D2/D3/D4/D5/D6 静态分量）
+    description: >
+      specs/*.spec.md 元数据/REQ 唯一/五要素齐全 + guardrail 可执行正例逐条对冻结契约实现断言 +
+      红反例与 spec 一致 + D3/D6 空证据 BLOCKED 裁决（v2.1 原则 2）。
+      CI 环节9 口径 = --static-only；六维全跑按需。
+    layer: pr
+    tier: T0
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(specs/*.spec.md, evals/**/red_cases.jsonl)"
+    retry: 1
+    flaky_policy: "非确定性维度（D3/D6）缺证据即 BLOCKED，不做重试掩盖"
+    fail_action: PR 不可合并；回吐 reason_code=SPEC_GAP/EVAL_BUG
+    reason_codes: [SPEC_GAP, EVAL_BUG, GATE_BUG]
+    write_time_mirror: "lint-type-format"
+    evidence_ledger: "gates/health-ledger.md#spec-gate-static"
+    implementation:
+      src: tools/spec-gate/spec_gate.py:389-421 (static_consistency)
+      test: tools/spec-gate/tests/test_gate_semantics.py (10 tests)
+      ci_ref: ".github/workflows/ci.yml (pytest, tools/spec-gate/tests/)"
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: contract-hash-check
+    title: 契约 hash 秒检（G7）
+    description: >
+      contracts/registry.json 每条 (ref, semver) → sha256：重算实现文件哈希并比对。
+      全部一致 → 0；任何不一致/文件缺失/表损坏 → 1（fail-closed）。
+      breaking 分类按 breaking_policy 人工裁决，本脚本只负责秒检与拦截。
+    layer: pr
+    tier: T0
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(contracts/registry.json)"
+    retry: 0
+    flaky_policy: "纯标准库零网络，抖动概率 ≈ 0；不重试"
+    fail_action: PR 不可合并；回吐 reason_code=SPEC_GAP
+    reason_codes: [SPEC_GAP, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#contract-hash-check"
+    implementation:
+      src: tools/check_contracts.py
+      test: 手动回归（README 示例 + CI 间接覆盖）
+      ci_ref: ".github/workflows/ci.yml (pytest 间接覆盖 check_contracts 导入路径)"
+    cadence: null
+    metrics:
+      unique_captures: "probed: 历史 1 条全部一致（ci.yml 注释 D1-R5 轮）"
+      false_positives: "0（纯哈希比对，无误报路径）"
+
+  - id: registry-drift-check
+    title: 注册表漂移校验（GP §6.3 / §8 元门禁）
+    description: >
+      tools/gate-registry/validate.py --check：注册表声明的门禁 vs CI 配置实际跑的 diff 报告。
+      新增门禁未接线 / 下线门禁仍在 CI 运行 → 漂移 WARN/FAIL。
+    layer: pr
+    tier: T0
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(gates/registry.yaml, .github/workflows/ci.yml)"
+    retry: 0
+    flaky_policy: "YAML/正则解析确定性输出，不重试"
+    fail_action: PR 不可合并；漂移项须随 PR 同批消账
+    reason_codes: [GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#registry-drift-check"
+    implementation:
+      src: tools/gate-registry/validate.py
+      test: tools/gate-registry/tests/test_validate.py (≥6 tests)
+      ci_ref: ".github/workflows/ci.yml (待接线，v0.9 仅本地手动)"
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  # ──────────────────────────────────────────────────────────────
+  # T1 分钟级并行（≤15min，T0 全绿后并行）
+  # ──────────────────────────────────────────────────────────────
+  - id: ci-pytest-suite
+    title: glue pytest 全量（四 testpaths 整仓门禁）
+    description: >
+      仓根裸 pytest 全量，floor=535（CI 口径；主包 399 + e2b_compat 41 + console-tui 87 +
+      spec-gate 语义 9 = 536，1 skip）。floor 随上游棘轮只升不降，不许静默放行。
+      testpaths = tests/ + providers/e2b_compat/ + tools/console-tui/ + tools/spec-gate/tests/
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/**/*.py, tests/**/*.py, providers/**/*.py, tools/**/*.py)"
+    retry: 1
+    flaky_policy: >
+      flaky 率 SLO<1%；隔离复跑一次；仍失败 → quarantine(tests/quarantine.yaml, TTL=+14d) +
+      reason_code=FLAKY 登记 + 缺陷单。非确定性门禁确定性化（temperature=0 / median-of-3 /
+      属性测试固定种子）。
+    fail_action: PR 不可合并；全量回吐（T1 失败 → T2 不跑）
+    reason_codes: [IMPL_BUG, EVAL_BUG, FLAKY, INFRA]
+    write_time_mirror: "stop-hook-affected-tests"
+    evidence_ledger: "gates/health-ledger.md#ci-pytest-suite"
+    implementation:
+      src: src/**/*.py
+      test: tests/ providers/e2b_compat/ tools/console-tui/ tools/spec-gate/tests/
+      ci_ref: ".github/workflows/ci.yml:88-120"
+    cadence: null
+    metrics:
+      unique_captures: "probed: ci.yml D1-R8 轮捕获 16 缺陷（两批 8+8）"
+      false_positives: "0（floor 棘轮 + quarantine 隔离双控）"
+
+  - id: guardrail-aggregate
+    title: GuardrailRun 聚合语义（fail-closed / 五步链路 / 决策点唯一）
+    description: >
+      aggregate([])==UNKNOWN / 任一 BLOCKED→BLOCKED / 非规范值→UNKNOWN / executable 仅在 PASS。
+      五步链路（create→submit→finalize→gate→void）；ASK 仅 permission_rail 可提交；
+      必填缺交折算 UNKNOWN 参与同一聚合（R6/D1）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/guardrail.py, specs/guardrail.spec.md)"
+    retry: 1
+    flaky_policy: "纯函数确定性；状态机测试用 clock fixture 隔离"
+    fail_action: PR 不可合并；回吐 reason_code=IMPL_BUG
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#guardrail-aggregate"
+    implementation:
+      src: src/jiuwen_glue/guardrail.py:75-93 (aggregate), 210-348 (GuardrailRunStore)
+      test: tests/test_guardrail.py (22 tests)
+      contracts: contracts/registry.json:1 (jiuwen_glue.guardrail.aggregate @ 1.0.1)
+    cadence: null
+    metrics:
+      unique_captures: "probed: W-01 缺陷#2（空集 fail-open）; R5/D1 非规范值 fail-open; R6/D1 缺交短路; D1-R8 split_task 等 16 缺陷均过本门禁"
+      false_positives: "0（spec 正反例 14+14 全量断言）"
+
+  - id: lease-semantics
+    title: 租约语义（级联 / 过期 / 派生 / 权限约束 / 耗尽 / 吊销）
+    description: >
+      REQ-L-01 级联独立于父终态 / L-03 过期先落 EXPIRED 再级联 / L-04 派生扣减父 remaining /
+      L-06 非空父快照约束子快照 / L-08 remaining 归零→EXHAUSTED / L-10 cost>remaining 拒绝。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/leases.py, specs/leases.spec.md)"
+    retry: 1
+    flaky_policy: "时间 frozen clock；种子固定"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#lease-semantics"
+    implementation:
+      src: src/jiuwen_glue/leases.py
+      test: tests/test_lease.py (~10 tests)
+      contracts: contracts/registry.json（待入 leases 契约）
+    cadence: null
+    metrics:
+      unique_captures: "probed: W-01 缺陷#1（级联依赖父终态）已修复"
+      false_positives: pending
+
+  - id: decision-layer
+    title: 决策层三原语（classify/score/judge UNKNOWN 收口）
+    description: >
+      JevProvider 三原语：后端缺失/弃权/越界返回值/非法分值 → None + RefusalRecord（可观测），
+      绝不静默编造 DecisionRecord。ModelBackend 只留形状不发调用（WO-0010）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/decision.py, src/jiuwen_glue/decisions.py)"
+    retry: 1
+    flaky_policy: "确定性规则后端；refusals 列表顺序固定"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#decision-layer"
+    implementation:
+      src: src/jiuwen_glue/decision.py
+      test: tests/test_decision.py + tests/test_decisions.py
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7  rounds 浮点参数 NaN/±inf/巨型 int 拒绝 5+2 缺陷"
+      false_positives: "0（规则后端确定性输出）"
+
+  - id: admission-mirror
+    title: admission 镜像（guardrail_verdict_of 与 store.gate() 同序）
+    description: >
+      admission.py guardrail_verdict_of 必须与 GuardrailRunStore.gate() 同序：
+      缺交折算 UNKNOWN 参与同一聚合、BLOCKED 一票否决优先于缺交、脏行守卫在 BLOCKED 之前。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/admission.py, src/jiuwen_glue/guardrail.py)"
+    retry: 1
+    flaky_policy: "clock fixture 隔离"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#admission-mirror"
+    implementation:
+      src: src/jiuwen_glue/admission.py
+      test: tests/test_admission.py (~10 tests, mirror parity assertions)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7 终局 workers 门控快照脏行 fail-open 修复"
+      false_positives: pending
+
+  - id: challenge-ask
+    title: Challenge ASK 授权三态（UNKNOWN 未决 → 批准后 PASS）
+    description: >
+      ASK 仅 permission_rail 可提交；提交后 check 落 UNKNOWN + Challenge 条数+1；
+      批准后以 PASS + evidence_ref=challenge:<id> 重新提交 → 门控可过。
+      run 无 ChallengeBoard 时 ASK → GuardrailStateError。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/challenge.py, src/jiuwen_glue/guardrail.py)"
+    retry: 1
+    flaky_policy: "时间 frozen clock；TTL 参数化"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#challenge-ask"
+    implementation:
+      src: src/jiuwen_glue/challenge.py
+      test: tests/test_challenge.py (~8 tests)
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: promotion-gate
+    title: 晋升三关（质量 / 脱敏 / 决策层打分）
+    description: >
+      shortlist→promoted 须过三道门：质量门（success_rate≥0.8 + eval_samples≥3）、
+      脱敏门（redaction_checker 注入，未注入→UNKNOWN→拒绝）、决策层打分（score_hook 可选交叉点，
+      None=弃权=拒绝）。版本化入库 + tombstone 撤回。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/promotion.py)"
+    retry: 1
+    flaky_policy: "确定性规则；eval 指标 append-only"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, EVAL_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#promotion-gate"
+    implementation:
+      src: src/jiuwen_glue/promotion.py
+      test: tests/test_promotion.py (~12 tests)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7  score_hook NaN/±inf 使 min_score 门禁恒 False 放行修复"
+      false_positives: pending
+
+  - id: selection-formula
+    title: 择优公式（N≤5 护栏 + 五信号权重 + 平局字典序）
+    description: >
+      五信号权重（eval 0.45 + mutation 0.20 + conciseness 0.15 + diff_consensus 0.10 + budget 0.10）；
+      N>5 拒绝加载（权重复算护栏）；空集拒绝；平局字典序（R1 唯一豁免）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: affected
+    cache_key: "hash(src/jiuwen_glue/selection.py)"
+    retry: 1
+    flaky_policy: "确定性公式；平局字典序可复算"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#selection-formula"
+    implementation:
+      src: src/jiuwen_glue/selection.py
+      test: tests/test_selection.py (~10 tests)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R8  selection.score 巨型 int OverflowError 拒绝"
+      false_positives: pending
+
+  - id: fleet-scheduler
+    title:  fleet 调度（GPU 份额 / best-fit / FEFO 影子 / pressure）
+    description: >
+      GreedyScheduler GPU 份额闸（demand>free+EPS → SHORTFALL）、
+      FEFO 影子选择（choice_trace 只记录不生效，影子期红线）、
+      ResourcePressure 计量行 ratio 巨型 int 拒绝。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: affected
+    cache_key: "hash(src/jiuwen_glue/fleet*.py)"
+    retry: 1
+    flaky_policy: "影子期 choice_trace 只写不生效；确定性 best-fit"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, INFRA]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#fleet-scheduler"
+    implementation:
+      src: src/jiuwen_glue/fleet*.py
+      test: tests/test_fleet_scheduler.py + tests/test_fleet_scheduler_p2.py + tests/test_fleet_worker.py
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7  gpu_frac NaN 投毒 overcommit 修复; D1-R8 巨型 int 拒绝"
+      false_positives: pending
+
+  - id: billing-usage
+    title: 计费与用量（DuckDB 路径 / occurred_at / quantity 有限闸）
+    description: >
+      UsageEventRow.occurred_at/quantity 有限闸（NaN/±inf/巨型 int 归类拒绝）、
+      _in_window duck 路径 float() 包转、settle 生效窗预检、weekly_report 窗口边界。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/billing.py, src/jiuwen_glue/usage.py)"
+    retry: 1
+    flaky_policy: "DuckDB 内存确定性；clock fixture"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#billing-usage"
+    implementation:
+      src: src/jiuwen_glue/billing.py + src/jiuwen_glue/usage.py
+      test: tests/test_billing.py + tests/test_usage.py (~40 tests)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7  occurred_at None/空串/巨型 int 四类拒绝; quantity duck 包转"
+      false_positives: "0（有限闸 + 类型闸双控）"
+
+  - id: iron-rules
+    title: 铁律三件套（悬空依赖 / 自依赖 / 兄弟环 / 标题重复 / 租户贯通）
+    description: >
+      depends_on 可核验（悬空引用/空串真值元组/自依赖/兄弟依赖环 DFS/标题重复 → Rule3UnverifiableDependency）；
+      消息≠认领（铁律 1）/ 对话≠状态（铁律 2）/ 连续内部步骤≠子任务（铁律 3）；
+      子任务继承父租户（tenant_id 贯通）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/rules.py, src/jiuwen_glue/routes.py)"
+    retry: 1
+    flaky_policy: "确定性 DFS 环检测"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#iron-rules"
+    implementation:
+      src: src/jiuwen_glue/rules.py + src/jiuwen_glue/routes.py
+      test: tests/test_iron_rules.py + tests/test_routes.py (~12 tests)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R8  铁律 3 depends_on 可核验+落账; split_task 租户贯通"
+      false_positives: "0（DFS 环检测确定性）"
+
+  - id: statebuilder
+    title: 状态装配器（白名单 / 来源可溯 / 上限 / 巨型 int 拒绝）
+    description: >
+      字段白名单（state_schema.whitelist 外 → StateBuilderError）；
+      来源四元组（probed/declared/doc/computed）+ 事实性来源须带 evidence；
+      字段数≤24 / 单值序列化≤2000 字 / 选项数 3-7；巨型 int float() 溢出 → 拒绝。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/statebuilder.py)"
+    retry: 1
+    flaky_policy: "strict JSON 序列化，无随机"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#statebuilder"
+    implementation:
+      src: src/jiuwen_glue/statebuilder.py
+      test: tests/test_statebuilder.py (~10 tests)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R8  PlacementOption.from_mapping 巨型 int OverflowError 拒绝"
+      false_positives: pending
+
+  - id: finite-value-guard
+    title: 有限值跨模块闸（NaN / ±inf / 巨型 int 归类拒绝）
+    description: >
+      _finite 家族：challenge.ttl_seconds / escalation.time_budget_seconds /
+      billing.occurred_at+quantity / usage.occurred_at+quantity / leases.ttl_seconds /
+      fleet.gpu_frac / fleet.lease_ttl / promotion.score_hook / registration.heartbeat_ttl /
+      StormGuard 两浮点参数——全部 NaN/±inf/巨型 int → 拒绝（schema 错误不漂移纪律：
+      不抛出未归类 OverflowError/TypeError）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/{challenge,escalation,billing,usage,leases,promotion,registration}.py)"
+    retry: 1
+    flaky_policy: "math.isfinite 确定性；OverflowError 包转为 None 拒绝"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#finite-value-guard"
+    implementation:
+      src: 多模块共享 _finite / _to_float
+      test: tests/test_billing.py + tests/test_escalation.py + tests/test_promotion.py + tests/test_lease.py
+      ci_floor_ref: "ci.yml D1-R7/D1-R8 轮 +9 用例 (509→519→535)"
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7/D1-R8 共 11 缺陷（NaN 穿过各模块 fail-open）"
+      false_positives: "0（有限值域数学确定性）"
+
+  - id: escalation-finite
+    title: 升级 time_budget_seconds 有限闸
+    description: >
+      escalate() 的 time_budget_seconds 必须有限数值；NaN/±inf/巨型 int →
+      EscalationSchemaError（不抛出未归类崩溃）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/escalation.py)"
+    retry: 1
+    flaky_policy: "确定性 _finite 检查"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#escalation-finite"
+    implementation:
+      src: src/jiuwen_glue/escalation.py
+      test: tests/test_escalation.py (time_budget_seconds cases)
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R7  time_budget_seconds NaN fail-open"
+      false_positives: pending
+
+  - id: tenant-inheritance
+    title: 租户贯通（子任务继承父任务 tenant_id）
+    description: >
+      rules.split_task 子任务继承父任务 tenant_id；SubtaskSpec.tenant_id 显式声明≠父租户
+      = 跨租户拆分 → TENANT_MISMATCH 拒绝 + 留痕（对齐 fleet REJECT_TENANT）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: affected
+    cache_key: "hash(src/jiuwen_glue/rules.py)"
+    retry: 0
+    flaky_policy: "确定性继承逻辑"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#tenant-inheritance"
+    implementation:
+      src: src/jiuwen_glue/rules.py
+      test: tests/test_tenant_id.py + tests/test_iron_rules.py
+    cadence: null
+    metrics:
+      unique_captures: "probed: D1-R8  子任务跨租户拆分（tenant_id='t0' 硬编码）修复"
+      false_positives: pending
+
+  - id: platform-tokens
+    title: 平台令牌（JWT 解析 / refresh / expiry 校验）
+    description: >
+      JwtTokenSet 解析（alg 白名单 / 过期拒绝 / 必填字段校验）+ refresh 链（refresh_token
+      换 access_token）+ token 状态机（active/expired/revoked）。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/platform_tokens.py)"
+    retry: 1
+    flaky_policy: "jwt 解码确定性；clock fixture"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#platform-tokens"
+    implementation:
+      src: src/jiuwen_glue/platform_tokens.py
+      test: tests/test_platform_tokens.py (~20 tests)
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: meta-governance
+    title: 元治理 schema 校验（TheoryProposal / TriggerRecord / InstanceReg）
+    description: >
+      meta_governance 对象 schema 必填字段校验 + 状态机合法转换 + 触发器计数阈值。
+    layer: pr
+    tier: T1
+    mode: blocking
+    scope: full-repo
+    cache_key: "hash(src/jiuwen_glue/meta_governance.py)"
+    retry: 0
+    flaky_policy: "确定性 schema 校验"
+    fail_action: PR 不可合并
+    reason_codes: [IMPL_BUG, SPEC_GAP]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#meta-governance"
+    implementation:
+      src: src/jiuwen_glue/meta_governance.py
+      test: tests/test_meta_governance.py (~15 tests)
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: spec-gate-d1-determinism
+    title: spec-gate D1 可判定性（双独立实现一致率 ≥90%）
+    description: >
+      穷举输入域（长度 0..4，3^0+…+3^4=121 个列表）∪ spec 正例 ∪ 红反例 上，
+      参考实现（jiuwen_glue.guardrail.aggregate）与第二独立实现（spec_gate.second_aggregate，
+      fold 写法，不同构）一致率 ≥90%。
+    layer: pr
+    tier: T2
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(specs/guardrail.spec.md, tools/spec-gate/spec_gate.py)"
+    retry: 0
+    flaky_policy: "确定性 pure function；全量输入域穷举"
+    fail_action: 影子读数；达标后转 blocking（D18 棘轮）
+    reason_codes: [GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#spec-gate-d1-determinism"
+    implementation:
+      src: tools/spec-gate/spec_gate.py:211-235 (dim_determinability)
+      test: tools/spec-gate/tests/test_gate_semantics.py (D1 covered in full-run report)
+    cadence: null
+    metrics:
+      unique_captures: "probed: spec_gate.py D1 全跑 agreement=100%（121 inputs, 0 disagreements）"
+      false_positives: "0（双实现语义等价数学可证）"
+
+  - id: spec-gate-d2-lethality
+    title: spec-gate D2 杀伤性（双向变异杀死率 ≥80%）
+    description: >
+      D2a 正例变异（期望值改成其余两态）× oracular 抓获率 ≥80%；D2b 规则变异
+      （8 个似真误读实现 × eval 集杀死率 ≥80%）。
+    layer: pr
+    tier: T2
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(evals/guardrail-aggregate/red_cases.jsonl, specs/guardrail.spec.md)"
+    retry: 0
+    flaky_policy: "纯函数变异；eval 集固定"
+    fail_action: 影子读数；达标后转 blocking
+    reason_codes: [EVAL_BUG, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#spec-gate-d2-lethality"
+    implementation:
+      src: tools/spec-gate/spec_gate.py:238-293 (dim_lethality) + _mutants()
+      test: tools/spec-gate/tests/test_gate_semantics.py
+    cadence: null
+    metrics:
+      unique_captures: "probed: D2a 100%（期望变异全抓获）; D2b 8/8 变异体全杀"
+      false_positives: "0（spec 正例 vacuous 检查 + 规则变异全覆盖）"
+
+  - id: spec-gate-d4-stability
+    title: spec-gate D4 稳定性（全量重跑逐字节比对，零抖动）
+    description: >
+      六维（除 D6）结果整体重算两次，规范化 JSON 逐字节比对。identical=True → PASS。
+    layer: pr
+    tier: T2
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(tools/spec-gate/spec_gate.py)"
+    retry: 0
+    flaky_policy: "纯函数确定性；无 I/O 随机"
+    fail_action: 影子读数；抖动>0 → 缺陷单 + GATE_BUG
+    reason_codes: [GATE_BUG, INFRA]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#spec-gate-d4-stability"
+    implementation:
+      src: tools/spec-gate/spec_gate.py:363-368 (dim_stability) + 483-494 (snapshot A/B)
+      test: tools/spec-gate/tests/test_gate_semantics.py
+    cadence: null
+    metrics:
+      unique_captures: "probed: 本地多轮全跑 identical=True（零抖动）"
+      false_positives: "0（字节比对无歧义）"
+
+  - id: spec-gate-d5-redproof
+    title: spec-gate D5 红证明（新 case 在旧实现快照断言失败）
+    description: >
+      kills_impl=pre-w01-fail-open 的红反例必须在 old_impls.py（6f4674c aggregate 逐字拷贝）
+      上复现断言失败。
+    layer: pr
+    tier: T2
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(tools/spec-gate/old_impls.py, evals/guardrail-aggregate/red_cases.jsonl)"
+    retry: 0
+    flaky_policy: "旧快照固定；红反例集只增"
+    fail_action: 影子读数；红证明失效 → 该 case 须重新红证或撤下
+    reason_codes: [EVAL_BUG, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#spec-gate-d5-redproof"
+    implementation:
+      src: tools/spec-gate/spec_gate.py:370-384 (dim_red_proof) + tools/spec-gate/old_impls.py
+      test: tools/spec-gate/tests/test_gate_semantics.py
+    cadence: null
+    metrics:
+      unique_captures: "probed: 6 条 agg-red-* 在 6f4674c 快照全部复现失败"
+      false_positives: "0（旧实现快照只读不变）"
+
+  - id: spec-gate-d6-outcome
+    title: spec-gate D6 结局一致性（与结局标签背离率 <5%）
+    description: >
+      outcome_cases.jsonl 样本集：聚合结论与 outcome_label 背离率 <5%。
+      零样本 = BLOCKED（空证据不放行，v2.1 原则 2）。
+    layer: pr
+    tier: T2
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(evals/guardrail-aggregate/outcome_cases.jsonl)"
+    retry: 0
+    flaky_policy: " outcome_cases.jsonl 只增不删；背离率数学确定"
+    fail_action: 影子读数；背离率≥5% → FAIL；零样本 → BLOCKED
+    reason_codes: [EVAL_BUG, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#spec-gate-d6-outcome"
+    implementation:
+      src: tools/spec-gate/spec_gate.py:318-351 (dim_outcome_consistency)
+      test: tools/spec-gate/tests/test_gate_semantics.py (D6 zero-samples / threshold / drift)
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: "0（样本只增不删，背离率单调可算）"
+
+  # ──────────────────────────────────────────────────────────────
+  # L0 写码时镜像（最左可执行位；shadow，只预热不裁决）
+  # ──────────────────────────────────────────────────────────────
+  - id: lint-type-format
+    title: L0 增量 lint / 类型 / 格式（W1+W2 镜像）
+    description: >
+      W1 编辑器 LSP 诊断流（≤200ms）+ W2 PostToolUse hook（≤2s）：增量 lint + 单文件类型诊断
+      + format。无裁决权（提示）；对应 T0 static-scan / contract-hash 的 L0 镜像。
+    layer: write-time
+    tier: T0
+    mode: shadow
+    scope: diff
+    cache_key: "hash(diff 文件清单)"
+    retry: 0
+    flaky_policy: "lint 非确定性工具（如 ruff --fix）结果固定于 diff；不重试掩盖"
+    fail_action: 仅预警；PR 门禁以 T0 为准
+    reason_codes: []
+    write_time_mirror: "spec-gate-static,contract-hash-check"
+    evidence_ledger: "gates/health-ledger.md#lint-type-format"
+    implementation:
+      src: "L0 hook 层（待接线；当前 CI-only）"
+      test: "手动 IDE 诊断；无自动化回归"
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: stop-hook-affected-tests
+    title: L0 Stop hook 受影响单测预跑（W3 镜像）
+    description: >
+      W3 Stop hook（≤30s）：import 图受影响单测选择 + 执行 + T0 全集预跑。
+      无裁决权；对应 T1 ci-pytest-suite 的 L0 镜像。
+    layer: write-time
+    tier: T1
+    mode: shadow
+    scope: affected
+    cache_key: "hash(import graph, diff)"
+    retry: 0
+    flaky_policy: "测试选择确定性（import 图不变）；预跑结果只预警"
+    fail_action: 仅预警；PR 门禁以 T1 为准
+    reason_codes: []
+    write_time_mirror: "ci-pytest-suite"
+    evidence_ledger: "gates/health-ledger.md#stop-hook-affected-tests"
+    implementation:
+      src: "L0 hook 层（待接线；当前 CI-only）"
+      test: "手动 import 图测试；无自动化回归"
+    cadence: null
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  # ──────────────────────────────────────────────────────────────
+  # L5 合入后扫描（post-merge，cadence 分层）
+  # ──────────────────────────────────────────────────────────────
+  - id: post-merge-night-scan
+    title: 合入后夜扫快档（night cadence）
+    description: >
+      E12 夜扫总线（链路 P95≤2h）：diff 域安全 / CVE 增量 / churn 度量 /
+      LLM 批扫 / API 面 diff。发现物 → 债台账 → 修复 PR 回灌 L3。
+    layer: post-merge
+    tier: T1
+    mode: shadow
+    scope: diff
+    cache_key: "hash(trunk HEAD diff)"
+    retry: 2
+    flaky_policy: "网络扫描 flaky 自动退避重试 2 次；仍失败 → 债台账 INFRA 条目"
+    fail_action: 影子；发现物自动生成修复 PR；不阻断 trunk
+    reason_codes: [INFRA, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#post-merge-night-scan"
+    implementation:
+      src: "L5 扫描总线（待接线；当前骨架态）"
+      test: "手动夜扫演练（未常驻）"
+    cadence: night
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: post-merge-weekly-scan
+    title: 合入后周扫重档（weekly cadence）
+    description: >
+      全库静态全谱 / 债度量与热点 / 优雅度批扫 / 文档-代码一致性 / TODO 治理 /
+      依赖全量 / 死配置清理 / 边界全图。
+    layer: post-merge
+    tier: T2
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(trunk HEAD)"
+    retry: 2
+    flaky_policy: "长时扫描 flaky 退避重试；超时 → 下周继续"
+    fail_action: 影子；债条目进台账
+    reason_codes: [INFRA, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#post-merge-weekly-scan"
+    implementation:
+      src: "L5 扫描总线（待接线；当前骨架态）"
+      test: "手动周扫演练（未常驻）"
+    cadence: weekly
+    metrics:
+      unique_captures: pending
+      false_positives: pending
+
+  - id: post-merge-event-scan
+    title: 事件触发全库重扫（event cadence）
+    description: >
+      依赖 major / 契约 bump / 热点超阈 / 新模块 / eval 版本变更 / 新 CVE 公告。
+    layer: post-merge
+    tier: T0
+    mode: shadow
+    scope: full-repo
+    cache_key: "hash(trunk HEAD, event trigger payload)"
+    retry: 1
+    flaky_policy: "事件触发幂等；重复事件去重"
+    fail_action: 影子；CVE 高危 → 自动修复 PR
+    reason_codes: [INFRA, GATE_BUG]
+    write_time_mirror: "none"
+    evidence_ledger: "gates/health-ledger.md#post-merge-event-scan"
+    implementation:
+      src: "L5 事件总线（待接线；当前骨架态）"
+      test: "手动 CVE 公告演练（未常驻）"
+    cadence: event
+    metrics:
+      unique_captures: pending
+      false_positives: pending
