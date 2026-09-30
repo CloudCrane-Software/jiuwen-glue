@@ -21,7 +21,8 @@ VIEWS = {
     "glue.v_recent_decision": ["decision_record", "context_hash", "chosen",
                                "rationale_ref", "meta"],
     "glue.v_node_utilization": ["glue.node", "cpu_frac", "gpu_frac", "trust_level",
-                                "max_parallel", "online_window"],
+                                "max_parallel", "online_window",
+                                "node_heartbeat", "hb_seen_at", "hb_version"],
 }
 
 # W-04 计量面板：glue.v_usage 定义在 CNB company-ops ops/sql/004_usage_events.sql
@@ -106,10 +107,12 @@ def test_data_pg_queries_align_with_views():
     for field in VIEWS_PENDING_DDL_W06["glue.v_readiness_card"]:
         assert field in cards_sql, f"v_readiness_card 取数缺列 {field!r}"
     # pg 写路径只允许出现这几张基础表（干预写死的范围：decision_record /
-    # challenge / readiness_card[W-06，表 DDL 同上待落]）
+    # challenge / readiness_card[W-06，表 DDL 同上待落]）+ 下单写路径（线E：
+    # team_task INSERT + task_transition admin 流转——创建新对象，非干预）
     written_tables = set(re.findall(r"INTO (glue\.\w+)|UPDATE (glue\.\w+)", data))
     flat = {a or b for a, b in written_tables}
-    assert flat <= {"glue.decision_record", "glue.challenge", "glue.readiness_card"}, \
+    assert flat <= {"glue.decision_record", "glue.challenge", "glue.readiness_card",
+                    "glue.team_task", "glue.task_transition"}, \
         f"干预写路径越界: {flat}"
 
 
@@ -120,3 +123,18 @@ def test_data_pg_queries_are_parameterized():
     assert "f\"SELECT" not in data and "f'SELECT" not in data
     assert ".format(" not in data
     assert re.search(r'execute\(sql, tuple\(params\)\)', data) is not None
+
+
+# ── 线E（2026-09-29）：010 补授权 DCL 静态检查 ────────────────────────────────
+
+GRANTS_PATH = TOOL_DIR / "sql" / "010_console_grants.sql"
+
+
+def test_grants_file_only_grants_select_with_role_guard():
+    text = GRANTS_PATH.read_text(encoding="utf-8")
+    code = _code_lines(text)
+    for view in ("glue.v_usage", "glue.v_signal_timeline"):
+        assert f"GRANT SELECT ON {view} TO jiuwen" in code
+    assert code.count("GRANT") == 2                     # 只授这两条 SELECT，无其他授权
+    # 角色守卫（对齐 008 惯例）：无 jiuwen 角色时 NOTICE 跳过
+    assert "pg_roles" in code and "NOTICE" in code
