@@ -16,4 +16,4 @@ W-02 复核标注缺口 G-1：v2.0 §4.2 要求决策记录"含 outcome 回填�
 - src/jiuwen_glue/decisions.py：DecisionRecord.outcome 字段 + record_outcome；
 - src/jiuwen_glue/decision.py：DecisionLayer.record_outcome / outcome_of 门面；
 - tests/test_g1_outcome_backfill.py 6 例 + 锁测试增补；全量 587 passed+1 skipped；
-- DDL：CNB company-ops ops/sql/009_outcome_backfill.sql（ALTER ADD outcome jsonb NULL，幂等；append-only 触发器不受影响——UPDATE 仍被拒，回填经 INSERT 语义由 Python 层承载，DDL 注明）。
+- DDL：CNB company-ops ops/sql/**011**_outcome_backfill.sql（ALTER ADD outcome jsonb NULL，幂等；append-only 触发器不受影响——UPDATE 仍被拒，回填经 INSERT 语义由 Python 层承载，DDL 注明）。〔勘误 2026-09-30 终修-仓库与文档一致性-R2：原写 009 与已跟踪 009_team_task_ledger_reconcile.sql 同号两义、010 已被 glue 仓 tools/console-tui/sql/010_console_grants.sql 占用——改号 011 入仓 company-ops（2026-09-29 已应用 srv-1，登记见其 docs/db-state-registry.md 2026-09-30 条）。〕
